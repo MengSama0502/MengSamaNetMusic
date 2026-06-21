@@ -1,0 +1,22 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "result": {
+    "item": "mengsamanetmusic:music_player"
+  },
+  "pattern": [
+    "CIC",
+    "CPC",
+    "CIC"
+  ],
+  "key": {
+    "C": {
+      "tag": "forge:ingots/copper"
+    },
+    "I": {
+      "tag": "forge:ingots/iron"
+    },
+    "P": {
+      "item": "mengsamanetmusic:music_player_block"
+    }
+  }
+}

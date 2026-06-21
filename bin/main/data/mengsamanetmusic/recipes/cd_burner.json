@@ -1,0 +1,25 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "result": {
+    "item": "mengsamanetmusic:cd_burner"
+  },
+  "pattern": [
+    " L ",
+    "IRI",
+    "CCC"
+  ],
+  "key": {
+    "L": {
+      "item": "minecraft:lightning_rod"
+    },
+    "I": {
+      "tag": "forge:nuggets/iron"
+    },
+    "R": {
+      "tag": "forge:dusts/redstone"
+    },
+    "C": {
+      "tag": "forge:ingots/copper"
+    }
+  }
+}

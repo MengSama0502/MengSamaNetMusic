@@ -1,0 +1,22 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "result": {
+    "item": "mengsamanetmusic:ender_music_player"
+  },
+  "pattern": [
+    "OEO",
+    "EPE",
+    "OEO"
+  ],
+  "key": {
+    "O": {
+      "item": "minecraft:obsidian"
+    },
+    "E": {
+      "item": "minecraft:ender_pearl"
+    },
+    "P": {
+      "item": "mengsamanetmusic:music_player"
+    }
+  }
+}

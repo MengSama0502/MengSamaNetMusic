@@ -1,0 +1,25 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "result": {
+    "item": "mengsamanetmusic:music_player"
+  },
+  "pattern": [
+    "  C",
+    " LN",
+    "OOO"
+  ],
+  "key": {
+    "C": {
+      "tag": "forge:ingots/copper"
+    },
+    "L": {
+      "item": "minecraft:lightning_rod"
+    },
+    "N": {
+      "item": "minecraft:note_block"
+    },
+    "O": {
+      "tag": "minecraft:planks"
+    }
+  }
+}

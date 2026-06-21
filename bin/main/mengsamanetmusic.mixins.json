@@ -1,0 +1,29 @@
+{
+    "required": true,
+    "minVersion": "0.8",
+    "package": "com.mengsama.mod.mengsamanetmusic.mixin",
+    "compatibilityLevel": "JAVA_17",
+    "refmap": "mengsamanetmusic.refmap.json",
+    "mixins": [
+        "AbstractContainerMenuMixin",
+        "FuckTelemetryMixin",
+        "CanBurnerCDListMixin",
+        "CanPlayListMixin",
+        "PlayModeMixin",
+        "ItemMusicCDMixin",
+        "BlockMusicPlayerMixin",
+        "TileEntityMusicPlayerMixin",
+        "NetMusicListItemMixin"
+    ],
+    "client": [
+        "AbstractContainerScreenMixin",
+        "CDBurnerMenuScreenMixin",
+        "GetMusicMixin",
+        "GamePauseMixin",
+        "ScreenAccessor",
+        "SoundPausedMixin",
+        "TickableSoundGetterMixins"
+    ],
+    "server": [
+    ]
+}

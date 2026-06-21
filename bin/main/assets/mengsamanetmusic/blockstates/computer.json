@@ -1,0 +1,19 @@
+{
+  "variants": {
+    "facing=north": {
+      "model": "mengsamanetmusic:block/computer"
+    },
+    "facing=south": {
+      "model": "mengsamanetmusic:block/computer",
+      "y": 180
+    },
+    "facing=west": {
+      "model": "mengsamanetmusic:block/computer",
+      "y": 270
+    },
+    "facing=east": {
+      "model": "mengsamanetmusic:block/computer",
+      "y": 90
+    }
+  }
+}

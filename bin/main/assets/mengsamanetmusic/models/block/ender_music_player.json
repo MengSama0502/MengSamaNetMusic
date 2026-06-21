@@ -1,0 +1,12 @@
+{
+  "parent": "block/cube",
+  "textures": {
+    "up": "mengsamanetmusic:block/ender_player_top",
+    "down": "mengsamanetmusic:block/ender_player_bottom",
+    "south": "mengsamanetmusic:block/ender_player_side",
+    "north": "mengsamanetmusic:block/ender_player_side",
+    "east": "mengsamanetmusic:block/ender_player_side",
+    "west": "mengsamanetmusic:block/ender_player_side",
+    "particle": "mengsamanetmusic:block/ender_player_side"
+  }
+}

@@ -1,0 +1,49 @@
+modLoader = "javafml"
+loaderVersion = "[46,)"
+license = "MIT"
+
+[[mods]]
+modId = "mengsamanetmusic"
+version = "${mod_version}"
+displayName = "MengSama Net Music"
+authors = "MengSama"
+description = '''
+A comprehensive music player mod for Minecraft integrating NetEase Cloud Music, QQ Music, and local music playback.
+Features: Music player blocks, CD burning, portable music player, playlist management, HUD, Ender music player, 
+NetEase/QQ dual login, VIP bypass, music caching, and more.
+'''
+
+[[dependencies.mengsamanetmusic]]
+modId = "forge"
+mandatory = true
+versionRange = "[46,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "minecraft"
+mandatory = true
+versionRange = "[1.20,1.20.2)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "touhou_little_maid"
+mandatory = false
+versionRange = "[1.5.2,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "cloth_config"
+mandatory = false
+versionRange = "[11.1.0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "patchouli"
+mandatory = false
+versionRange = "[1.20.1-84,)"
+ordering = "AFTER"
+side = "BOTH"
