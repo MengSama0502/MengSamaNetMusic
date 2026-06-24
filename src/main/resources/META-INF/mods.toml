@@ -1,0 +1,67 @@
+modLoader = "javafml"
+loaderVersion = "[46,)"
+license = "MIT"
+
+[[mods]]
+modId = "mengsamanetmusic"
+version = "${mod_version}"
+logoFile = "Mod.png"
+displayName = "MengSama Net Music"
+authors = "MengSama0502, niumadadi520, YuZiJiang"
+credits = "Program: MengSama0502 & niumadadi520 | Art: YuZiJiang | Models: niumadadi520"
+description = '''
+MengSama Net Music is a comprehensive music player mod for Minecraft,
+integrating NetEase Cloud Music, QQ Music, and local music playback.
+
+Features:
+- Music Player block with custom 3D model
+- Portable Music Player with block placement and handheld use
+- Playlist management with multiple play modes
+- NetEase Cloud Music and QQ Music integration
+- Real-time lyrics display and HUD overlay
+- Music caching system
+- VIP song bypass via login
+- Sophisticated Backpacks and Touhou Little Maid compatibility
+'''
+
+[[dependencies.mengsamanetmusic]]
+modId = "forge"
+mandatory = true
+versionRange = "[46,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "minecraft"
+mandatory = true
+versionRange = "[1.20,1.20.2)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "touhou_little_maid"
+mandatory = false
+versionRange = "[1.5.2,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "cloth_config"
+mandatory = false
+versionRange = "[11.1.0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "patchouli"
+mandatory = false
+versionRange = "[1.20.1-84,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "geckolib"
+mandatory = true
+versionRange = "[4.2,)"
+ordering = "AFTER"
+side = "BOTH"
