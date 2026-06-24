@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "mengsamanetmusic",
+  "version": "${version}",
+  "name": "MengSama Net Music",
+  "description": "A comprehensive music player mod integrating NetEase Cloud Music, QQ Music and local playback.",
+  "authors": [
+    "MengSama0502",
+    "niumadadi520",
+    "YuZiJiang"
+  ],
+  "contact": {
+    "homepage": "https://github.com/MengSama0502/MengSamaNetMusic"
+  },
+  "license": "MIT",
+  "icon": "assets/mengsamanetmusic/textures/item/mod_icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic"
+    ],
+    "client": [
+      "com.mengsama.mod.mengsamanetmusic.client.ClientModEvents"
+    ]
+  },
+  "mixins": [
+    "mengsamanetmusic.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*",
+    "geckolib": ">=4.5"
+  },
+  "suggests": {
+    "cloth-config": ">=15.0.0"
+  }
+}
