@@ -1,0 +1,40 @@
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "MIT"
+
+[[mods]]
+modId = "mengsamanetmusic"
+version = "${mod_version}"
+logoFile = "Mod.png"
+displayName = "MengSama Net Music"
+authors = "MengSama0502, niumadadi520, YuZiJiang"
+credits = "Program: MengSama0502 & niumadadi520 | Art: YuZiJiang | Models: niumadadi520"
+description = "MengSama Net Music is a comprehensive music player mod for Minecraft, integrating NetEase Cloud Music, QQ Music, and local music playback."
+
+[[dependencies.mengsamanetmusic]]
+modId = "neoforge"
+mandatory = true
+versionRange = "[1,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "minecraft"
+mandatory = true
+versionRange = "[1.21.1,1.21.2)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "cloth_config"
+mandatory = false
+versionRange = "[15.0.0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "geckolib"
+mandatory = true
+versionRange = "[4.5,)"
+ordering = "AFTER"
+side = "BOTH"
