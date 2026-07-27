@@ -17,14 +17,13 @@ public class ModConfig {
     public static ForgeConfigSpec.ConfigValue<String> ORIGINAL_MAID_LYRICS_COLOR;
     public static ForgeConfigSpec.ConfigValue<String> TRANSLATED_MAID_LYRICS_COLOR;
 
-    public static ForgeConfigSpec.BooleanValue ENABLE_NETMUSIC_CD_GENERATION;
-    public static ForgeConfigSpec.BooleanValue ENABLE_VIP_NETMUSIC_CD_GENERATION;
-
     public static ForgeConfigSpec.ConfigValue<String> NET_EASE_COOKIE;
     public static ForgeConfigSpec.ConfigValue<String> NET_EASE_MUSIC_LEVEL;
 
     public static ForgeConfigSpec.ConfigValue<String> MUSIC_PROVIDER;
     public static ForgeConfigSpec.ConfigValue<String> QQ_VIP_COOKIE;
+    /** Optional MusicKit developer token reserved for compliant catalog integration; never used to bypass DRM. */
+    public static ForgeConfigSpec.ConfigValue<String> APPLE_MUSICKIT_TOKEN;
     public static ForgeConfigSpec.ConfigValue<String> MUSIC_QUALITY;
 
     public static ForgeConfigSpec.BooleanValue DEBUG_MODE;
@@ -69,14 +68,6 @@ public class ModConfig {
         TRANSLATED_MAID_LYRICS_COLOR = builder.define("TranslatedMaidLyricsColor", "#FF000000");
         builder.pop();
 
-        builder.push("sophisticated_backpacks");
-        builder.comment("Whether NetMusic CDs can generate inside mob backpacks");
-        ENABLE_NETMUSIC_CD_GENERATION = builder.define("EnableNetMusicCDGeneration", false);
-
-        builder.comment("Whether VIP NetMusic CDs can generate inside mob backpacks");
-        ENABLE_VIP_NETMUSIC_CD_GENERATION = builder.define("EnableVIPNetMusicCDGeneration", false);
-        builder.pop();
-
         builder.push("netease");
         builder.comment("NetEase Cloud Music Cookie (optional, for song info API)",
                 "VIP song playback uses Meting API, no cookie needed",
@@ -96,6 +87,11 @@ public class ModConfig {
                 "Single-player/Client: set here on the client",
                 "Use /mengsamanetmusic reload to hot-reload after changing");
         QQ_VIP_COOKIE = builder.define("QQVipCookie", "");
+
+        builder.comment("Optional Apple MusicKit developer token reserved for future compliant catalog calls",
+                "The default iTunes Search API needs no key and only plays previewUrl clips",
+                "This token cannot and will not be used to bypass Apple Music DRM or subscription authorization");
+        APPLE_MUSICKIT_TOKEN = builder.define("AppleMusicKitToken", "");
 
         builder.comment("Music quality preference: standard, high, lossless");
         MUSIC_QUALITY = builder.define("MusicQuality", "standard");

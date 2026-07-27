@@ -1,16 +1,28 @@
 package com.mengsama.mod.mengsamanetmusic.gui;
 
 import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
+import com.mengsama.mod.mengsamanetmusic.api.AppleMusicApi;
+import com.mengsama.mod.mengsamanetmusic.api.NetEaseApi;
 import com.mengsama.mod.mengsamanetmusic.api.NetEaseSearchResult;
+import com.mengsama.mod.mengsamanetmusic.api.NetEaseSearchMetadataLoader;
+import com.mengsama.mod.mengsamanetmusic.api.SearchGeneration;
+import com.mengsama.mod.mengsamanetmusic.api.QqMusicUtils;
+import com.mengsama.mod.mengsamanetmusic.api.QqSearchResult;
 import com.mengsama.mod.mengsamanetmusic.api.SongInfo;
+import com.mengsama.mod.mengsamanetmusic.api.VipCookieState;
 import com.mengsama.mod.mengsamanetmusic.block.MusicPlayerBlockEntity;
-import com.mengsama.mod.mengsamanetmusic.hud.MusicInfoHud;
-import com.mengsama.mod.mengsamanetmusic.item.MusicCDItem;
+import com.mengsama.mod.mengsamanetmusic.config.MusicPlayerUiConfig;
+import com.mengsama.mod.mengsamanetmusic.client.MusicPlayerBackground;
+import com.mengsama.mod.mengsamanetmusic.client.audio.ClientMusicPlayback;
+import com.mengsama.mod.mengsamanetmusic.client.lyric.ClientLyricStore;
+import com.mengsama.mod.mengsamanetmusic.client.lyric.PlaybackSeekUtil;
+import com.mengsama.mod.mengsamanetmusic.network.SeekPlaybackPacket;
 import com.mengsama.mod.mengsamanetmusic.item.MusicListItem;
 import com.mengsama.mod.mengsamanetmusic.network.BlockAddSongPacket;
 import com.mengsama.mod.mengsamanetmusic.network.ModNetwork;
 import com.mengsama.mod.mengsamanetmusic.util.NetMusicListUtil;
 import com.mengsama.mod.mengsamanetmusic.util.PlayMode;
+import com.mengsama.mod.mengsamanetmusic.util.PlaylistFilter;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -19,7 +31,6 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.Util;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
-import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.components.ObjectSelectionList;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
@@ -39,16 +50,12 @@ import java.util.concurrent.CompletableFuture;
 
 @OnlyIn(Dist.CLIENT)
 public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlayerPlaylistMenu> {
-    private static final int GUI_WIDTH = 280;
-    private static final int GUI_HEIGHT = 418;
-
     private static final int TAB_SEARCH = 0;
     private static final int TAB_PLAYLIST = 1;
     private static final int TAB_LYRICS = 2;
     private int currentTab = TAB_SEARCH;
 
-    private static final int BG_DEEPEST = 0xF60A0A12;
-    private static final int BG_PANEL = 0xCC181830;
+    private static final int BG_PANEL = 0x99181830;
     private static final int BG_PANEL_LIGHT = 0x99202038;
     private static final int BG_CARD = 0x55222244;
     private static final int BG_CARD_HOVER = 0x88303055;
@@ -68,16 +75,25 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
     private static final int PROGRESS_BG = 0xFF222238;
 
     private EditBox searchBox;
-    private Button searchButton;
-    private Button playButton, stopButton, nextButton, prevButton, modeButton;
-    private Button tabSearchBtn, tabPlaylistBtn, tabLyricsBtn;
+    private TransparentButton sourceButton;
+    private TransparentButton searchButton;
+    private TransparentButton qqLoginButton;
+    private final ProviderAuthControls providerAuth;
+    /** 0=NetEase, 1=QQ, 2=Apple/iTunes preview. */
+    private int searchSource;
+    private TransparentButton playButton, stopButton, nextButton, prevButton, modeButton;
+    private TransparentButton tabSearchBtn, tabPlaylistBtn, tabLyricsBtn;
     private SearchResultList resultList;
     private PlaylistList playlistList;
     private LyricList lyricList;
 
     private boolean isSearching;
+    private boolean draggingProgress;
+    private int previewSeekSecond;
+    private final SearchGeneration searchGeneration = new SearchGeneration();
     private Component statusMessage = Component.empty();
     private int lyricRefreshCounter = 0;
+    private final PlayerLayoutEditor layoutEditor;
 
     private static final int TITLE_H = 24;
     private static final int SEARCH_Y = 30;
@@ -93,8 +109,13 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
 
     public MusicPlayerPlaylistScreen(MusicPlayerPlaylistMenu menu, Inventory inv, Component title) {
         super(menu, inv, title);
-        this.imageWidth = GUI_WIDTH;
-        this.imageHeight = GUI_HEIGHT;
+        MusicPlayerUiConfig.Values ui = MusicPlayerUiConfig.get();
+        this.imageWidth = ui.screenWidth;
+        this.imageHeight = ui.screenHeight;
+        boolean portable = menu.getBlockEntity() instanceof com.mengsama.mod.mengsamanetmusic.block.PortableMusicPlayerBlockEntity;
+        this.layoutEditor = new PlayerLayoutEditor(portable ? "portable_block" : "block");
+        this.providerAuth = new ProviderAuthControls(portable ? ProviderAuthControls.Context.PORTABLE_BLOCK
+                : ProviderAuthControls.Context.JUKEBOX, this, message -> this.statusMessage = message);
     }
 
     private BlockPos getBlockPos() {
@@ -107,93 +128,159 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
 
     @Override
     protected void init() {
+        MusicPlayerUiConfig.Values ui = MusicPlayerUiConfig.get();
+        this.imageWidth = ui.screenWidth;
+        this.imageHeight = ui.screenHeight;
         super.init();
         int cx = this.leftPos;
         int cy = this.topPos;
-
-        int searchBoxW = 196;
-        this.searchBox = new EditBox(this.font, cx + 14, cy + SEARCH_Y + 2, searchBoxW, 18,
+        this.layoutEditor.begin(cx, cy, this.imageWidth, this.imageHeight);
+        int margin = ui.horizontalMargin;
+        int gap = ui.controlGap;
+        int sourceBtnW = ui.sourceButtonWidth;
+        int searchBtnW = ui.searchButtonWidth;
+        int loginBtnW = ui.qqLoginButtonWidth;
+        int availableSearchW = this.imageWidth - margin * 2 - sourceBtnW - searchBtnW - loginBtnW - gap * 3;
+        int searchBoxW = Math.max(80, Math.min(ui.searchBoxWidth, availableSearchW));
+        this.sourceButton = this.addRenderableWidget(this.layoutEditor.register("source", TransparentButton.builder(getSourceButtonText(), b -> {
+                    this.searchSource = (this.searchSource + 1) % 3;
+                    searchGeneration.invalidate();
+                    this.isSearching = false;
+                    b.setMessage(getSourceButtonText());
+                    providerAuth.setProvider(searchSource);
+                    this.statusMessage = Component.empty();
+                    if (this.resultList != null) this.resultList.setResults(Collections.emptyList());
+                }).pos(cx + margin, cy + SEARCH_Y).size(sourceBtnW, SEARCH_H).build(), cx + margin - cx, cy + SEARCH_Y - cy));
+        int searchBoxX = cx + margin + sourceBtnW + gap;
+        this.searchBox = new EditBox(this.font, searchBoxX + 2, cy + SEARCH_Y + 2, searchBoxW - 4, 18,
                 Component.translatable("gui.mengsamanetmusic.music_player.search_placeholder"));
         this.searchBox.setBordered(false);
         this.searchBox.setMaxLength(50);
         this.searchBox.setTextColor(0xFFFFFFFF);
         this.searchBox.setHint(Component.translatable("gui.mengsamanetmusic.music_player.search_hint")
                 .withStyle(ChatFormatting.ITALIC, ChatFormatting.GRAY));
+        this.searchBox.setResponder(value -> {
+            if (currentTab == TAB_PLAYLIST && playlistList != null) playlistList.applyUserFilter(value);
+        });
         this.addWidget(this.searchBox);
 
-        int searchBtnW = 50;
-        this.searchButton = this.addRenderableWidget(Button.builder(
-                        Component.literal("\u2315 " + Component.translatable("gui.mengsamanetmusic.music_player.search").getString()),
-                        b -> performSearch())
-                .pos(cx + 14 + searchBoxW + 6, cy + SEARCH_Y).size(searchBtnW, SEARCH_H).build());
+        int searchBtnX = searchBoxX + searchBoxW + gap;
+        this.searchButton = this.addRenderableWidget(this.layoutEditor.register("search", TransparentButton.builder(
+                        Component.translatable("gui.mengsamanetmusic.music_player.search"), b -> performSearch())
+                .pos(searchBtnX, cy + SEARCH_Y).size(searchBtnW, SEARCH_H).build(), searchBtnX - cx, cy + SEARCH_Y - cy));
+        this.qqLoginButton = this.addRenderableWidget(this.layoutEditor.register("provider_auth",
+                providerAuth.createButton(searchBtnX + searchBtnW + gap, cy + SEARCH_Y, loginBtnW, SEARCH_H),
+                searchBtnX + searchBtnW + gap - cx, cy + SEARCH_Y - cy));
+        providerAuth.setProvider(searchSource);
 
-        int tabW = (GUI_WIDTH - 28 - 8) / 3;
-        this.tabSearchBtn = this.addRenderableWidget(Button.builder(
+        int tabW = (this.imageWidth - margin * 2 - 8) / 3;
+        this.tabSearchBtn = this.addRenderableWidget(this.layoutEditor.register("tab_search", TransparentButton.builder(
                         Component.translatable("gui.mengsamanetmusic.music_player.tab_search"),
                         b -> switchTab(TAB_SEARCH))
-                .pos(cx + 14, cy + TAB_Y).size(tabW, TAB_H).build());
-        this.tabPlaylistBtn = this.addRenderableWidget(Button.builder(
+                .pos(cx + margin, cy + TAB_Y).size(tabW, TAB_H).build(), cx + margin - cx, cy + TAB_Y - cy));
+        this.tabPlaylistBtn = this.addRenderableWidget(this.layoutEditor.register("tab_playlist", TransparentButton.builder(
                         Component.translatable("gui.mengsamanetmusic.music_player.tab_playlist"),
                         b -> switchTab(TAB_PLAYLIST))
-                .pos(cx + 14 + tabW + 4, cy + TAB_Y).size(tabW, TAB_H).build());
-        this.tabLyricsBtn = this.addRenderableWidget(Button.builder(
+                .pos(cx + margin + tabW + 4, cy + TAB_Y).size(tabW, TAB_H).build(), cx + margin + tabW + 4 - cx, cy + TAB_Y - cy));
+        this.tabLyricsBtn = this.addRenderableWidget(this.layoutEditor.register("tab_lyrics", TransparentButton.builder(
                         Component.translatable("gui.mengsamanetmusic.music_player.tab_lyrics"),
                         b -> switchTab(TAB_LYRICS))
-                .pos(cx + 14 + (tabW + 4) * 2, cy + TAB_Y).size(tabW, TAB_H).build());
+                .pos(cx + margin + (tabW + 4) * 2, cy + TAB_Y).size(tabW, TAB_H).build(), cx + margin + (tabW + 4) * 2 - cx, cy + TAB_Y - cy));
 
-        this.resultList = new SearchResultList(this.minecraft, GUI_WIDTH - 28, CONTENT_H,
-                cy + CONTENT_Y, cy + CONTENT_Y + CONTENT_H, 24);
-        this.resultList.setLeftPos(cx + 14);
+        int listWidth = this.imageWidth - margin * 2;
+        this.resultList = new SearchResultList(this.minecraft, listWidth, CONTENT_H,
+                cy + CONTENT_Y, cy + CONTENT_Y + CONTENT_H, ui.searchResultRowHeight);
+        this.resultList.setLeftPos(cx + margin);
         this.addWidget(this.resultList);
 
-        this.playlistList = new PlaylistList(this.minecraft, GUI_WIDTH - 28, CONTENT_H,
-                cy + CONTENT_Y, cy + CONTENT_Y + CONTENT_H, 22);
-        this.playlistList.setLeftPos(cx + 14);
+        this.playlistList = new PlaylistList(this.minecraft, listWidth, CONTENT_H,
+                cy + CONTENT_Y, cy + CONTENT_Y + CONTENT_H, ui.playlistRowHeight);
+        this.playlistList.setLeftPos(cx + margin);
         this.addWidget(this.playlistList);
 
-        this.lyricList = new LyricList(this.minecraft, GUI_WIDTH - 28, CONTENT_H,
-                cy + CONTENT_Y, cy + CONTENT_Y + CONTENT_H, 16);
-        this.lyricList.setLeftPos(cx + 14);
+        this.lyricList = new LyricList(this.minecraft, listWidth, CONTENT_H,
+                cy + CONTENT_Y, cy + CONTENT_Y + CONTENT_H, ui.lyricRowHeight);
+        this.lyricList.setLeftPos(cx + margin);
         this.addWidget(this.lyricList);
 
         int btnY = cy + CONTROLS_Y;
         int btnW = 48, btnH = CONTROLS_H, btnGap = 4;
         int totalBtnW = btnW * 5 + btnGap * 4;
-        int btnStartX = cx + (GUI_WIDTH - totalBtnW) / 2;
+        int btnStartX = cx + (this.imageWidth - totalBtnW) / 2;
 
-        this.prevButton = this.addRenderableWidget(Button.builder(
+        this.prevButton = this.addRenderableWidget(this.layoutEditor.register("previous", TransparentButton.builder(
                         Component.literal("\u25C0\u25C0"), b -> handleButtonClick(MusicPlayerPlaylistMenu.BUTTON_PREV))
-                .pos(btnStartX, btnY).size(btnW, btnH).build());
-        this.playButton = this.addRenderableWidget(Button.builder(
+                .pos(btnStartX, btnY).size(btnW, btnH).build(), btnStartX - cx, btnY - cy));
+        this.playButton = this.addRenderableWidget(this.layoutEditor.register("play_pause", TransparentButton.builder(
                         getPlayButtonText(), b -> handleButtonClick(MusicPlayerPlaylistMenu.BUTTON_PLAY))
-                .pos(btnStartX + (btnW + btnGap), btnY).size(btnW, btnH).build());
-        this.stopButton = this.addRenderableWidget(Button.builder(
+                .pos(btnStartX + (btnW + btnGap), btnY).size(btnW, btnH).build(), btnStartX + (btnW + btnGap) - cx, btnY - cy));
+        this.stopButton = this.addRenderableWidget(this.layoutEditor.register("stop", TransparentButton.builder(
                         Component.literal("\u25A0"), b -> handleButtonClick(MusicPlayerPlaylistMenu.BUTTON_STOP))
-                .pos(btnStartX + (btnW + btnGap) * 2, btnY).size(btnW, btnH).build());
-        this.nextButton = this.addRenderableWidget(Button.builder(
+                .pos(btnStartX + (btnW + btnGap) * 2, btnY).size(btnW, btnH).build(), btnStartX + (btnW + btnGap) * 2 - cx, btnY - cy));
+        this.nextButton = this.addRenderableWidget(this.layoutEditor.register("next", TransparentButton.builder(
                         Component.literal("\u25B6\u25B6"), b -> handleButtonClick(MusicPlayerPlaylistMenu.BUTTON_NEXT))
-                .pos(btnStartX + (btnW + btnGap) * 3, btnY).size(btnW, btnH).build());
-        this.modeButton = this.addRenderableWidget(Button.builder(
+                .pos(btnStartX + (btnW + btnGap) * 3, btnY).size(btnW, btnH).build(), btnStartX + (btnW + btnGap) * 3 - cx, btnY - cy));
+        this.modeButton = this.addRenderableWidget(this.layoutEditor.register("mode", TransparentButton.builder(
                         getModeButtonText(this.menu.getPlayMode()), b -> handleButtonClick(MusicPlayerPlaylistMenu.BUTTON_MODE))
-                .pos(btnStartX + (btnW + btnGap) * 4, btnY).size(btnW, btnH).build());
+                .pos(btnStartX + (btnW + btnGap) * 4, btnY).size(btnW, btnH).build(), btnStartX + (btnW + btnGap) * 4 - cx, btnY - cy));
 
         switchTab(TAB_SEARCH);
     }
 
+    @Override
+    public void removed() {
+        searchGeneration.invalidate();
+        isSearching = false;
+        MusicPlayerBackground.close();
+        super.removed();
+    }
+
     private void handleButtonClick(int buttonId) {
+        // 方块 GUI 点击时本地先直接暂停对应 OpenAL 源，服务器包负责权威确认和周边客户端。
+        if (buttonId == MusicPlayerPlaylistMenu.BUTTON_PLAY) {
+            String target = this.menu.getTargetId();
+            boolean paused = com.mengsama.mod.mengsamanetmusic.client.audio.ClientMusicPlayback.isPaused(target);
+            if (this.menu.isPlaying() || paused) {
+                com.mengsama.mod.mengsamanetmusic.client.audio.ClientMusicPlayback.setPaused(target, !paused);
+            }
+        }
         if (this.minecraft != null && this.minecraft.gameMode != null) {
             this.minecraft.gameMode.handleInventoryButtonClick(this.menu.containerId, buttonId);
         }
     }
 
+    private void updateTabVisibility() {
+        // 搜索页执行在线查询；播放列表页复用输入框，仅在客户端即时筛选。
+        boolean onlineSearch = currentTab == TAB_SEARCH;
+        boolean searchVisible = onlineSearch || currentTab == TAB_PLAYLIST;
+        if (this.searchBox != null) {
+            this.searchBox.visible = searchVisible;
+            this.searchBox.setHint(Component.translatable(onlineSearch
+                    ? "gui.mengsamanetmusic.music_player.search_hint"
+                    : "gui.mengsamanetmusic.music_player.playlist_filter_hint")
+                    .withStyle(ChatFormatting.ITALIC, ChatFormatting.GRAY));
+        }
+        if (this.sourceButton != null) this.sourceButton.visible = onlineSearch;
+        if (this.searchButton != null) this.searchButton.visible = onlineSearch;
+        if (this.qqLoginButton != null) this.qqLoginButton.visible = onlineSearch && searchSource == 1;
+    }
+
     private void switchTab(int tab) {
         this.currentTab = tab;
+        updateTabVisibility();
+        if (this.tabSearchBtn != null) this.tabSearchBtn.setSelected(tab == TAB_SEARCH);
+        if (this.tabPlaylistBtn != null) this.tabPlaylistBtn.setSelected(tab == TAB_PLAYLIST);
+        if (this.tabLyricsBtn != null) this.tabLyricsBtn.setSelected(tab == TAB_LYRICS);
         if (this.playlistList != null && tab == TAB_PLAYLIST) {
             this.playlistList.refresh();
         }
         if (this.lyricList != null && tab == TAB_LYRICS) {
             this.lyricList.refresh();
         }
+    }
+
+    private Component getSourceButtonText() {
+        return Component.literal(switch (searchSource) { case 1 -> "QQ音乐"; case 2 -> "Apple"; default -> "网易云"; });
     }
 
     private void performSearch() {
@@ -203,63 +290,101 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
             this.statusMessage = Component.translatable("gui.mengsamanetmusic.music_player.search_empty");
             return;
         }
-        if (this.isSearching) return;
         this.isSearching = true;
-        this.statusMessage = Component.translatable("gui.mengsamanetmusic.cd_burner.searching");
+        int selectedSource = this.searchSource;
+        boolean qqSearch = selectedSource == 1;
+        boolean appleSearch = selectedSource == 2;
+        String queryToken = (qqSearch ? "qq:" : appleSearch ? "apple:" : "netease:") + query;
+        long generation = searchGeneration.begin(queryToken);
+        this.statusMessage = Component.translatable("gui.mengsamanetmusic.search.searching");
         CompletableFuture.supplyAsync(() -> {
             try {
+                if (qqSearch) {
+                    List<NetEaseSearchResult> results = new ArrayList<>();
+                    for (QqSearchResult result : QqMusicUtils.search(query)) {
+                        results.add(new NetEaseSearchResult(result.getId(), result.getTitle(),
+                                result.getSinger(), result.isVip(), "qq",
+                                result.getAlbumMid(), result.getCoverUrl(), result.getAlbumName(), result.getDuration()));
+                    }
+                    return results;
+                }
+                if (appleSearch) return AppleMusicApi.search(query);
                 return parseSearchResults(MengSamaNetMusic.NET_EASE_API.search(query, 1, 30));
             } catch (Exception e) { throw new RuntimeException(e); }
         }, Util.backgroundExecutor()).whenComplete((results, error) -> Minecraft.getInstance().execute(() -> {
+            if (!searchGeneration.isCurrent(generation, queryToken)) return;
             this.isSearching = false;
             if (error != null) {
-                this.statusMessage = Component.translatable("gui.mengsamanetmusic.cd_burner.search_failed");
+                this.statusMessage = Component.translatable("gui.mengsamanetmusic.search.search_failed");
                 if (this.resultList != null) this.resultList.setResults(Collections.emptyList());
             } else {
-                if (this.resultList != null) this.resultList.setResults(results);
+                switchTab(TAB_SEARCH);
+                if (this.resultList != null) {
+                    this.resultList.setResults(results);
+                    this.resultList.setScrollAmount(0.0D);
+                }
                 this.statusMessage = (results == null || results.isEmpty())
-                        ? Component.translatable("gui.mengsamanetmusic.cd_burner.no_result") : Component.empty();
+                        ? Component.translatable("gui.mengsamanetmusic.search.no_result") : Component.empty();
+                if (!qqSearch && !appleSearch && results != null && !results.isEmpty()) {
+                    hydrateSearchCovers(results, generation, queryToken);
+                }
             }
         }));
     }
 
     private List<NetEaseSearchResult> parseSearchResults(String json) {
-        List<NetEaseSearchResult> results = new ArrayList<>();
-        try {
-            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-            if (!root.has("result")) return results;
-            JsonObject result = root.getAsJsonObject("result");
-            if (!result.has("songs")) return results;
-            JsonArray songs = result.getAsJsonArray("songs");
-            for (int i = 0; i < songs.size(); i++) {
-                JsonObject song = songs.get(i).getAsJsonObject();
-                long id = song.get("id").getAsLong();
-                String name = song.get("name").getAsString();
-                String artist = "";
-                if (song.has("ar") && song.get("ar").isJsonArray() && song.getAsJsonArray("ar").size() > 0) {
-                    artist = song.getAsJsonArray("ar").get(0).getAsJsonObject().get("name").getAsString();
-                }
-                int fee = song.has("fee") ? song.get("fee").getAsInt() : 0;
-                results.add(new NetEaseSearchResult(String.valueOf(id), name, artist, fee > 0));
-            }
-        } catch (Exception e) { MengSamaNetMusic.LOGGER.error("Failed to parse search results", e); }
-        return results;
+        return NetEaseApi.parseSearchResults(json);
+    }
+
+    private void hydrateSearchCovers(List<NetEaseSearchResult> results, long generation, String queryToken) {
+        NetEaseSearchMetadataLoader.hydrateMissing(results, MengSamaNetMusic.NET_EASE_API)
+                .whenComplete((hydrated, error) -> Minecraft.getInstance().execute(() -> {
+                    if (error != null || !searchGeneration.isCurrent(generation, queryToken)) return;
+                    if (this.resultList != null) this.resultList.replaceResults(hydrated);
+                }));
     }
 
     private void onSearchResultClicked(NetEaseSearchResult result, boolean playNow) {
         if (result == null) return;
-        this.statusMessage = Component.translatable("gui.mengsamanetmusic.cd_burner.loading");
+        this.statusMessage = Component.translatable("gui.mengsamanetmusic.search.loading");
         CompletableFuture.supplyAsync(() -> {
-            try { return MengSamaNetMusic.NET_EASE_API.get163Song(Long.parseLong(result.getSongId())); }
-            catch (Exception e) { return null; }
-        }).thenAccept(song -> Minecraft.getInstance().execute(() -> {
+            try {
+                SongInfo song;
+                if (result.isApple()) {
+                    song = AppleMusicApi.toSong(result);
+                } else if (result.isQq()) {
+                    song = QqMusicUtils.resolveSong(result.getSongId(), VipCookieState.getEffectiveVipCookie(), 1);
+                    if (song != null) {
+                        song.source = "qq";
+                        song.artists.clear();
+                        if (result.getArtistName() != null && !result.getArtistName().isBlank()) {
+                            song.artists.add(result.getArtistName());
+                        }
+                        song.providerId = result.getSongId();
+                        if (result.getAlbumMid() != null && !result.getAlbumMid().isBlank()) {
+                            song.albumMid = result.getAlbumMid();
+                        }
+                        if (result.getCoverUrl() != null && !result.getCoverUrl().isBlank()) {
+                            song.coverUrl = result.getCoverUrl();
+                            song.picUrl = result.getCoverUrl();
+                        }
+                        if (!result.getAlbumName().isBlank()) song.albumName = result.getAlbumName();
+                        if (song.songTime <= 0) song.songTime = result.getDuration();
+                        song.normalizeIdentity();
+                    }
+                } else {
+                    song = MengSamaNetMusic.NET_EASE_API.get163Song(result);
+                }
+                return song;
+            } catch (Exception e) { return null; }
+        }, Util.backgroundExecutor()).thenAccept(song -> Minecraft.getInstance().execute(() -> {
             if (song != null && song.isValid()) {
                 ModNetwork.CHANNEL.sendToServer(new BlockAddSongPacket(getBlockPos(), song, playNow));
                 this.statusMessage = playNow
                         ? Component.literal("\u25B6 " + song.songName).withStyle(ChatFormatting.GREEN)
                         : Component.literal("\u2713 " + song.songName).withStyle(ChatFormatting.AQUA);
             } else {
-                this.statusMessage = Component.translatable("gui.mengsamanetmusic.cd_burner.get_info_error");
+                this.statusMessage = Component.translatable("gui.mengsamanetmusic.search.get_info_error");
             }
         }));
     }
@@ -279,69 +404,50 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
     private String formatTime(int seconds) { return String.format("%d:%02d", seconds / 60, seconds % 60); }
 
     private int getPlayingTick() {
-        try {
-            if (com.mengsama.mod.mengsamanetmusic.util.NetMusicSound.currentTick >= 0)
-                return com.mengsama.mod.mengsamanetmusic.util.NetMusicSound.currentTick;
-            if (com.mengsama.mod.mengsamanetmusic.util.PlayerNetMusicSound.currentTick >= 0)
-                return com.mengsama.mod.mengsamanetmusic.util.PlayerNetMusicSound.currentTick;
-        } catch (Exception ignored) {}
-        return -1;
+        return ClientMusicPlayback.getTick(this.menu.getTargetId());
+    }
+
+    private SongInfo getPlayingSongInfo() {
+        SongInfo active = ClientMusicPlayback.getSongInfo(this.menu.getTargetId());
+        // Packet/sound registration may trail the synchronized block state by a few ticks. Use the
+        // menu's current slot as a stable lyric identity until the active sound becomes observable.
+        return ClientLyricStore.selectGuiSong(active, this.menu.isPlaying(),
+                this.menu.getSongInfo(this.menu.getPlayIndex()));
     }
 
     private SongInfo getSongInfoFromCd(ItemStack cd) {
-        if (cd.getItem() instanceof MusicListItem) {
-            return MusicListItem.getSongInfo(cd);
-        } else if (cd.getItem() instanceof MusicCDItem) {
-            return MusicCDItem.getSongInfo(cd);
-        }
-        return null;
+        return cd.getItem() instanceof MusicListItem ? MusicListItem.getSongInfo(cd) : null;
     }
 
     @Override
     protected void renderBg(GuiGraphics graphics, float partialTicks, int mouseX, int mouseY) {
         renderBackground(graphics);
         int x = this.leftPos, y = this.topPos, w = this.imageWidth, h = this.imageHeight;
+        MusicPlayerUiConfig.Values ui = MusicPlayerUiConfig.get();
 
-        graphics.fill(x, y, x + w, y + h, BG_DEEPEST);
-        for (int i = 0; i < h; i++) {
-            float ratio = (float) i / h;
-            int r = (int) (0x12 + 0x08 * Math.sin(ratio * Math.PI));
-            int g = (int) (0x12 + 0x08 * Math.sin(ratio * Math.PI));
-            int b = (int) (0x30 + 0x10 * Math.sin(ratio * Math.PI));
-            graphics.fill(x, y + i, x + w, y + i + 1, (0xE6 << 24) | (r << 16) | (g << 8) | b);
-        }
-        for (int i = 0; i < 24; i++) {
-            int alpha = (int) (0x40 * (1 - i / 24.0));
-            int mid = x + w / 2;
-            graphics.fill(x, y + i, mid, y + i + 1, (alpha << 24) | 0x7C6FFF);
-            graphics.fill(mid, y + i, x + w, y + i + 1, (alpha << 24) | 0x4ECDC4);
-        }
-        graphics.fill(x, y, x + w, y + TITLE_H, BG_PANEL);
-        for (int i = 0; i < w; i++) {
-            float ratio = (float) i / w;
-            int r = (int) (0x7C + (0x4E - 0x7C) * ratio);
-            int g = (int) (0x6F + (0xCD - 0x6F) * ratio);
-            int b = (int) (0xFF + (0xC4 - 0xFF) * ratio);
-            graphics.fill(x + i, y + TITLE_H - 1, x + i + 1, y + TITLE_H, (0xFF << 24) | (r << 16) | (g << 8) | b);
-        }
-        graphics.fill(x, y + TITLE_H, x + w, y + TITLE_H + 2, 0x447C6FFF);
+        MusicPlayerBackground.renderCover(graphics, x, y, w, h, ui.background());
+        graphics.fill(x, y, x + w, y + TITLE_H, ui.panel());
+        graphics.fill(x, y + TITLE_H - 1, x + w, y + TITLE_H, ui.accent());
+        graphics.fill(x, y + TITLE_H, x + w, y + TITLE_H + 2, (0x44 << 24) | ui.themeRgb());
 
-        int searchBoxW = 196;
-        graphics.fill(x + 8, y + TITLE_H + 2, x + w - 8, y + SEARCH_Y + SEARCH_H + 4, BG_PANEL);
-        graphics.fill(x + 12, y + SEARCH_Y, x + 12 + searchBoxW + 4, y + SEARCH_Y + SEARCH_H, SLOT_BG);
-        graphics.renderOutline(x + 12, y + SEARCH_Y, searchBoxW + 4, SEARCH_H, BORDER);
+        int availableSearchW = w - ui.horizontalMargin * 2 - ui.sourceButtonWidth - ui.searchButtonWidth - ui.qqLoginButtonWidth - ui.controlGap * 3;
+        int searchBoxW = Math.max(80, Math.min(ui.searchBoxWidth, availableSearchW));
+        int searchBoxX = x + ui.horizontalMargin + ui.sourceButtonWidth + ui.controlGap;
+        graphics.fill(x + 8, y + TITLE_H + 2, x + w - 8, y + SEARCH_Y + SEARCH_H + 4, ui.panelSurface());
+        graphics.fill(searchBoxX, y + SEARCH_Y, searchBoxX + searchBoxW, y + SEARCH_Y + SEARCH_H, ui.popupSurface());
+        graphics.renderOutline(searchBoxX, y + SEARCH_Y, searchBoxW, SEARCH_H, ui.border());
         if (this.searchBox != null && this.searchBox.isFocused())
-            graphics.renderOutline(x + 12, y + SEARCH_Y, searchBoxW + 4, SEARCH_H, ACCENT);
+            graphics.renderOutline(searchBoxX, y + SEARCH_Y, searchBoxW, SEARCH_H, ui.accent());
 
-        graphics.fill(x + 8, y + TAB_Y - 2, x + w - 8, y + TAB_Y + TAB_H + 2, BG_PANEL);
-        graphics.fill(x + 8, y + CONTENT_Y - 2, x + w - 8, y + CONTENT_Y + CONTENT_H + 2, BG_PANEL);
-        graphics.renderOutline(x + 8, y + CONTENT_Y - 2, w - 16, CONTENT_H + 4, BORDER);
+        graphics.fill(x + 8, y + TAB_Y - 2, x + w - 8, y + TAB_Y + TAB_H + 2, ui.panelSurface());
+        graphics.fill(x + 8, y + CONTENT_Y - 2, x + w - 8, y + CONTENT_Y + CONTENT_H + 2, ui.listSurface());
+        graphics.renderOutline(x + 8, y + CONTENT_Y - 2, w - 16, CONTENT_H + 4, ui.border());
         graphics.fill(x + 9, y + CONTENT_Y - 1, x + w - 9, y + CONTENT_Y, ACCENT_DIM);
-        graphics.fill(x + 8, y + CONTROLS_Y - 4, x + w - 8, y + CONTROLS_Y + CONTROLS_H + 4, BG_PANEL);
-        graphics.renderOutline(x + 8, y + CONTROLS_Y - 4, w - 16, CONTROLS_H + 8, BORDER_LIGHT);
-        graphics.fill(x + 8, y + PROGRESS_Y - 2, x + w - 8, y + PROGRESS_Y + 20, BG_PANEL);
+        graphics.fill(x + 8, y + CONTROLS_Y - 4, x + w - 8, y + CONTROLS_Y + CONTROLS_H + 4, ui.panelSurface());
+        graphics.renderOutline(x + 8, y + CONTROLS_Y - 4, w - 16, CONTROLS_H + 8, ui.border());
+        graphics.fill(x + 8, y + PROGRESS_Y - 2, x + w - 8, y + PROGRESS_Y + 20, ui.panelSurface());
 
-        graphics.fill(x + 8, y + NOW_PLAYING_Y, x + w - 8, y + NOW_PLAYING_Y + 24, BG_PANEL);
+        graphics.fill(x + 8, y + NOW_PLAYING_Y, x + w - 8, y + NOW_PLAYING_Y + 24, ui.popupSurface());
         int statusColor = isPlaying() ? STATUS_PLAYING : STATUS_STOPPED;
         graphics.fill(x + 8, y + NOW_PLAYING_Y, x + 10, y + NOW_PLAYING_Y + 24, statusColor);
 
@@ -349,21 +455,21 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
         for (int i = 0; i < w - 16; i++) {
             float ratio = (float) i / (w - 16);
             int alpha = (int) (0x66 * (1 - Math.abs(ratio - 0.5) * 2));
-            graphics.fill(x + 8 + i, sepY, x + 8 + i + 1, sepY + 1, (alpha << 24) | 0x7C6FFF);
+            graphics.fill(x + 8 + i, sepY, x + 8 + i + 1, sepY + 1, (alpha << 24) | ui.themeRgb());
         }
 
         int invLeft = x + MusicPlayerPlaylistMenu.INV_X - 1;
         int invTop = y + MusicPlayerPlaylistMenu.INV_Y - 1;
         int invWidth = 9 * 18 + 2, invHeight = 3 * 18 + 2;
-        graphics.fill(invLeft, invTop, invLeft + invWidth, invTop + invHeight, BG_PANEL_LIGHT);
-        graphics.renderOutline(invLeft, invTop, invWidth, invHeight, BORDER_LIGHT);
+        graphics.fill(invLeft, invTop, invLeft + invWidth, invTop + invHeight, ui.panelSurface());
+        graphics.renderOutline(invLeft, invTop, invWidth, invHeight, ui.border());
         for (int row = 0; row < 3; row++)
             for (int col = 0; col < 9; col++)
                 graphics.renderOutline(invLeft + 1 + col * 18, invTop + 1 + row * 18, 18, 18, BORDER);
 
         int hotbarTop = y + MusicPlayerPlaylistMenu.HOTBAR_Y - 1;
-        graphics.fill(invLeft, hotbarTop, invLeft + invWidth, hotbarTop + 20, BG_PANEL_LIGHT);
-        graphics.renderOutline(invLeft, hotbarTop, invWidth, 20, BORDER_LIGHT);
+        graphics.fill(invLeft, hotbarTop, invLeft + invWidth, hotbarTop + 20, ui.panelSurface());
+        graphics.renderOutline(invLeft, hotbarTop, invWidth, 20, ui.border());
         for (int col = 0; col < 9; col++)
             graphics.renderOutline(invLeft + 1 + col * 18, hotbarTop + 1, 18, 18, BORDER);
     }
@@ -376,9 +482,9 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
         super.render(graphics, mouseX, mouseY, partialTicks);
         int x = this.leftPos, y = this.topPos;
 
-        graphics.drawString(font, Component.literal("\u266A").withStyle(ChatFormatting.LIGHT_PURPLE),
-                x + 10, y + 7, TEXT_ACCENT, false);
-        graphics.drawString(font, this.title, x + 22, y + 7, TEXT_ACCENT, false);
+        MusicPlayerUiConfig.Values ui = MusicPlayerUiConfig.get();
+        graphics.drawString(font, Component.literal("\u266A"), x + 10, y + 7, ui.accent(), false);
+        graphics.drawString(font, this.title, x + 22, y + 7, ui.primaryText(), false);
 
         if (this.searchBox != null) this.searchBox.render(graphics, mouseX, mouseY, partialTicks);
 
@@ -397,6 +503,7 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
         renderNowPlaying(graphics, x, y);
         graphics.drawString(font, Component.translatable("container.inventory"),
                 x + 12, y + MusicPlayerPlaylistMenu.INV_Y - 10, TEXT_SECONDARY, false);
+        this.layoutEditor.render(graphics);
         this.renderTooltip(graphics, mouseX, mouseY);
     }
 
@@ -406,30 +513,26 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
         graphics.renderOutline(barX, barY, barW, barH, BORDER);
 
         int tick = getPlayingTick();
-        SongInfo hudInfo = MusicInfoHud.getInfo();
-        if (hudInfo != null && hudInfo.songTime > 0 && tick >= 0) {
-            float progress = Math.max(0, Math.min(1, (tick / 20.0f) / hudInfo.songTime));
+        SongInfo playingInfo = getPlayingSongInfo();
+        if (playingInfo != null && playingInfo.songTime > 0 && tick >= 0) {
+            int shownSecond = draggingProgress ? previewSeekSecond : PlaybackSeekUtil.secondAtTick(tick);
+            float progress = Math.max(0, Math.min(1, (float) shownSecond / playingInfo.songTime));
             int fillW = (int) (barW * progress);
             if (fillW > 0) {
-                for (int i = 0; i < fillW; i++) {
-                    float ratio = (float) i / Math.max(1, fillW);
-                    int r = (int) (0x7C + (0x4E - 0x7C) * ratio);
-                    int g = (int) (0x6F + (0xCD - 0x6F) * ratio);
-                    int b = (int) (0xFF + (0xC4 - 0xFF) * ratio);
-                    graphics.fill(barX + i, barY, barX + i + 1, barY + barH, (0xFF << 24) | (r << 16) | (g << 8) | b);
-                }
+                MusicPlayerUiConfig.Values ui = MusicPlayerUiConfig.get();
+                graphics.fill(barX, barY, barX + fillW, barY + barH, ui.accent());
                 graphics.fill(barX, barY, barX + fillW, barY + 1, 0x66FFFFFF);
                 int handleX = barX + fillW - 2;
-                graphics.fill(handleX, barY - 1, handleX + 4, barY + barH + 1, ACCENT_BRIGHT);
+                graphics.fill(handleX, barY - 1, handleX + 4, barY + barH + 1, ui.secondaryAccent());
             }
-            graphics.drawString(font, formatTime(tick / 20), barX, barY + barH + 3, TEXT_DIM, false);
-            String totalTime = formatTime(hudInfo.songTime);
+            graphics.drawString(font, formatTime(shownSecond), barX, barY + barH + 3, TEXT_DIM, false);
+            String totalTime = formatTime(playingInfo.songTime);
             graphics.drawString(font, totalTime, barX + barW - font.width(totalTime), barY + barH + 3, TEXT_DIM, false);
         }
     }
 
     private void renderNowPlaying(GuiGraphics graphics, int x, int y) {
-        SongInfo hudInfo = MusicInfoHud.getInfo();
+        SongInfo playingInfo = getPlayingSongInfo();
         int infoY = y + NOW_PLAYING_Y + 4;
         boolean playing = isPlaying();
         graphics.drawString(font, playing ? "\u25B6" : "\u25A0", x + 14, infoY,
@@ -438,14 +541,14 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
                 ? Component.translatable("gui.mengsamanetmusic.music_player.playing")
                 : Component.translatable("gui.mengsamanetmusic.music_player.stopped"),
                 x + 26, infoY, playing ? STATUS_PLAYING : STATUS_STOPPED, false);
-        if (hudInfo != null && hudInfo.songName != null) {
-            String name = hudInfo.songName;
+        if (playingInfo != null && playingInfo.songName != null) {
+            String name = playingInfo.songName;
             int maxW = this.imageWidth - 80;
             if (font.width(name) > maxW) name = font.plainSubstrByWidth(name, maxW - 8) + "...";
             graphics.drawString(font, name, x + 14, infoY + 12, TEXT_PRIMARY, false);
 
-            String sourceName = SongInfo.getSourceDisplayName(hudInfo.source);
-            int sourceColor = SongInfo.getSourceColor(hudInfo.source);
+            String sourceName = SongInfo.getSourceDisplayName(playingInfo.source);
+            int sourceColor = SongInfo.getSourceColor(playingInfo.source);
             int sourceX = x + 14 + font.width(name) + 6;
             int sourceW = font.width(sourceName) + 4;
             if (sourceX + sourceW < x + this.imageWidth - 14) {
@@ -460,6 +563,11 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (button == 0 && updateSeekPreview(mouseX, mouseY)) {
+            draggingProgress = true;
+            return true;
+        }
+        if (this.layoutEditor.mouseClicked(mouseX, mouseY, button)) return true;
         if (this.searchBox != null && this.searchBox.mouseClicked(mouseX, mouseY, button)) {
             this.setFocused(this.searchBox);
             return true;
@@ -476,6 +584,41 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
     }
 
     @Override
+    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+        if (button == 0 && draggingProgress) {
+            updateSeekPreview(mouseX, mouseY);
+            return true;
+        }
+        if (this.layoutEditor.mouseDragged(mouseX, mouseY, button)) return true;
+        return super.mouseDragged(mouseX, mouseY, button, dragX, dragY);
+    }
+
+    @Override
+    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        if (button == 0 && draggingProgress) {
+            updateSeekPreview(mouseX, mouseY);
+            draggingProgress = false;
+            ClientMusicPlayback.seekImmediately(this.menu.getTargetId(), previewSeekSecond);
+            ModNetwork.CHANNEL.sendToServer(new SeekPlaybackPacket(-1, getBlockPos(),
+                    this.menu.getTargetId(), previewSeekSecond,
+                    getPlayingSongInfo() == null ? "" : getPlayingSongInfo().identityKey()));
+            return true;
+        }
+        if (this.layoutEditor.mouseReleased(button)) return true;
+        return super.mouseReleased(mouseX, mouseY, button);
+    }
+
+    private boolean updateSeekPreview(double mouseX, double mouseY) {
+        SongInfo song = getPlayingSongInfo();
+        int barX = this.leftPos + 14;
+        int barY = this.topPos + PROGRESS_Y + 4;
+        int barW = this.imageWidth - 28;
+        if (song == null || song.songTime <= 0 || mouseY < barY - 5 || mouseY > barY + 11) return false;
+        previewSeekSecond = PlaybackSeekUtil.secondAtFraction((mouseX - barX) / barW, song.songTime);
+        return true;
+    }
+
+    @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
         if (currentTab == TAB_SEARCH && this.resultList != null) {
             if (this.resultList.mouseScrolled(mouseX, mouseY, delta)) return true;
@@ -489,6 +632,7 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (this.layoutEditor.keyPressed(keyCode, modifiers, this::reinitializeLayout)) return true;
         InputConstants.Key key = InputConstants.getKey(keyCode, scanCode);
         if (this.minecraft != null && this.minecraft.options.keyInventory.isActiveAndMatches(key)) {
             if (this.searchBox != null && this.searchBox.isFocused()) return true;
@@ -502,9 +646,19 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
         return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
+    private void reinitializeLayout() {
+        String value = this.searchBox != null ? this.searchBox.getValue() : "";
+        int tab = this.currentTab;
+        this.clearWidgets();
+        this.init();
+        if (this.searchBox != null) this.searchBox.setValue(value);
+        switchTab(tab);
+    }
+
     @Override
     protected void containerTick() {
         super.containerTick();
+        providerAuth.tick();
         if (this.searchBox != null) this.searchBox.tick();
         if (currentTab == TAB_LYRICS && this.lyricList != null) {
             lyricRefreshCounter++;
@@ -543,36 +697,26 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
             if (r == null) return;
             for (NetEaseSearchResult r0 : r) this.addEntry(new Entry(r0));
         }
+        public void replaceResults(List<NetEaseSearchResult> results) {
+            double scroll = this.getScrollAmount();
+            setResults(results);
+            this.setScrollAmount(scroll);
+        }
         private class Entry extends ObjectSelectionList.Entry<Entry> {
             private final NetEaseSearchResult result;
+            private int rowX, rowY, rowW, rowH;
             public Entry(NetEaseSearchResult r) { this.result = r; }
             @Override
             public void render(GuiGraphics g, int i, int y, int x, int ew, int eh, int mx, int my, boolean h, float p) {
-                int bg = h ? BG_CARD_HOVER : BG_CARD;
-                g.fill(x, y, x + ew, y + eh - 2, bg);
-                if (h) g.fill(x, y, x + 2, y + eh - 2, ACCENT);
-                g.fill(x, y, x + ew, y + 1, 0x22FFFFFF);
-                int ty = y + 4, pos = x + 6;
-                if (result.isVip()) {
-                    g.fill(pos - 1, ty - 1, pos + 24, ty + 9, 0x55FF4444);
-                    pos = g.drawString(font, Component.literal("[VIP]").withStyle(ChatFormatting.RED, ChatFormatting.BOLD), pos, ty, 0xFFFF4444, false) + 4;
-                }
-
-                String name = result.getSongName();
-                int mw = ew - (pos - x) - 10;
-                if (font.width(name) > mw) name = font.plainSubstrByWidth(name, mw - 8) + "...";
-                g.drawString(font, name, pos, ty, h ? 0xFFFFFFFF : 0xFFE0E0E0, false);
-
-                String artist = result.getArtistName();
-                if (artist != null && !artist.isEmpty()) {
-                    int amw = ew - 12;
-                    if (font.width(artist) > amw) artist = font.plainSubstrByWidth(artist, amw - 8) + "...";
-                    g.drawString(font, artist, x + 6, ty + 10, TEXT_SECONDARY, false);
-                }
+                this.rowX = x; this.rowY = y; this.rowW = ew; this.rowH = eh;
+                MusicPlayerUiConfig.Values ui = MusicPlayerUiConfig.get();
+                SongRowRenderer.renderSearch(g, font, result, x, y, ew, eh, h, ui.listSurface(), ui.listHoverSurface());
             }
             @Override public boolean mouseClicked(double mx, double my, int b) {
-                if (b == 0) { onSearchResultClicked(result, true); return true; }
-                if (b == 1) { onSearchResultClicked(result, false); return true; }
+                if (b == 0 && SongRowRenderer.hitAction(mx, my, rowX, rowY, rowW, rowH)) {
+                    onSearchResultClicked(result, false);
+                    return true;
+                }
                 return false;
             }
             @Override public @NotNull Component getNarration() { return Component.literal(result.getDisplayText()); }
@@ -580,8 +724,8 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
     }
 
     private class PlaylistList extends ObjectSelectionList<PlaylistList.Entry> {
-        private List<SongInfo> songs = new ArrayList<>();
-        private List<Integer> slotIndices = new ArrayList<>();
+        private final List<SongInfo> songs = new ArrayList<>();
+        private final List<Integer> slotIndices = new ArrayList<>();
         public PlaylistList(Minecraft mc, int w, int h, int top, int bottom, int ih) {
             super(mc, w, h, top, bottom, ih);
             this.setRenderBackground(false); this.setRenderTopAndBottom(false);
@@ -589,59 +733,68 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
         @Override public int getRowWidth() { return this.getWidth() - 12; }
         @Override protected int getScrollbarPosition() { return this.getLeft() + this.getWidth() - 6; }
         public void refresh() {
-            songs.clear(); slotIndices.clear();
+            List<SongInfo> newSongs = new ArrayList<>();
+            List<Integer> newSlots = new ArrayList<>();
+            double oldScroll = this.getScrollAmount();
+            int anchorSlot = visibleSlotAt(oldScroll);
+            double anchorOffset = oldScroll - Math.floor(oldScroll / rowHeight()) * rowHeight();
             var be = menu.getBlockEntity();
             if (be != null) {
                 var inv = be.getPlayerInv();
                 for (int i = 0; i < inv.getSlots(); i++) {
                     if (!inv.getStackInSlot(i).isEmpty()) {
                         SongInfo info = getSongInfoFromCd(inv.getStackInSlot(i));
-                        if (info != null) { songs.add(info); slotIndices.add(i); }
+                        if (info != null) { newSongs.add(info); newSlots.add(i); }
                     }
                 }
             }
+            if (MusicPlayerScreen.samePlaylist(songs, slotIndices, newSongs, newSlots)) return;
+            songs.clear();
+            songs.addAll(newSongs);
+            slotIndices.clear();
+            slotIndices.addAll(newSlots);
+            applyFilter(searchBox == null ? "" : searchBox.getValue(), oldScroll, anchorSlot, anchorOffset);
+        }
+        private int rowHeight() {
+            return Math.max(1, MusicPlayerUiConfig.get().playlistRowHeight);
+        }
+        private int visibleSlotAt(double scroll) {
+            int entryIndex = Math.max(0, (int) Math.floor(scroll / rowHeight()));
+            return entryIndex < children().size() ? children().get(entryIndex).realSlot : -1;
+        }
+        public void applyUserFilter(String query) {
+            applyFilter(query, 0.0D, -1, 0.0D);
+        }
+        private void applyFilter(String query, double fallbackScroll, int anchorSlot, double anchorOffset) {
             this.clearEntries();
-            for (int i = 0; i < songs.size(); i++) this.addEntry(new Entry(songs.get(i), i));
+            int anchorIndex = -1;
+            for (PlaylistFilter.Match match : PlaylistFilter.filter(songs, slotIndices, query)) {
+                if (match.slotIndex() == anchorSlot) anchorIndex = getItemCount();
+                this.addEntry(new Entry(match.song(), match.slotIndex()));
+            }
+            double restored = anchorIndex >= 0 ? anchorIndex * rowHeight() + anchorOffset : fallbackScroll;
+            this.setScrollAmount(Math.max(0.0D, restored));
         }
         private class Entry extends ObjectSelectionList.Entry<Entry> {
-            private final SongInfo song; private final int di;
-            public Entry(SongInfo s, int di) { this.song = s; this.di = di; }
+            private final SongInfo song; private final int realSlot;
+            private int rowX, rowY, rowW, rowH;
+            public Entry(SongInfo song, int realSlot) { this.song = song; this.realSlot = realSlot; }
             @Override
             public void render(GuiGraphics g, int i, int y, int x, int ew, int eh, int mx, int my, boolean h, float p) {
-                int cpi = menu.getPlayIndex();
-                boolean isCur = !slotIndices.isEmpty() && di < slotIndices.size() && slotIndices.get(di) == cpi;
-                int bg = isCur ? 0x664ECDC4 : (h ? BG_CARD_HOVER : BG_CARD);
-                g.fill(x, y, x + ew, y + eh - 2, bg);
-                g.fill(x, y, x + 2, y + eh - 2, isCur ? ACCENT_CYAN : (h ? ACCENT : 0x337C6FFF));
-                g.fill(x, y, x + ew, y + 1, 0x22FFFFFF);
-                int ty = y + 4;
-                g.drawString(font, (isCur ? "\u25B6 " : "") + (di + 1) + ".", x + 6, ty, isCur ? ACCENT_CYAN : TEXT_DIM, false);
-                String name = song.songName != null ? song.songName : "Unknown";
-                int mw = ew - 50;
-                if (font.width(name) > mw) name = font.plainSubstrByWidth(name, mw - 8) + "...";
-                g.drawString(font, name, x + 36, ty, isCur ? TEXT_PRIMARY : (h ? 0xFFFFFFFF : 0xFFE0E0E0), false);
-                if (song.artists != null && !song.artists.isEmpty()) {
-                    String a = String.join(", ", song.artists);
-                    int aw = ew - 12;
-                    if (font.width(a) > aw) a = font.plainSubstrByWidth(a, aw - 8) + "...";
-                    g.drawString(font, a, x + 6, ty + 11, TEXT_SECONDARY, false);
-                }
-                if (song.songTime > 0) {
-                    String t = formatTime(song.songTime);
-                    g.drawString(font, t, x + ew - font.width(t) - 6, ty, TEXT_DIM, false);
-                }
+                this.rowX = x; this.rowY = y; this.rowW = ew; this.rowH = eh;
+                boolean isCurrent = realSlot == menu.getPlayIndex();
+                MusicPlayerUiConfig.Values ui = MusicPlayerUiConfig.get();
+                SongRowRenderer.renderPlaylist(g, font, song, realSlot, x, y, ew, eh,
+                        h, isCurrent, ui.listSurface(), ui.listHoverSurface());
             }
             @Override public boolean mouseClicked(double mx, double my, int b) {
-                if (di < slotIndices.size()) {
-                    if (b == 0) {
-
-                        handleButtonClick(MusicPlayerPlaylistMenu.BUTTON_SELECT_BASE + slotIndices.get(di));
-                        return true;
-                    } else if (b == 1) {
-
-                        handleButtonClick(MusicPlayerPlaylistMenu.BUTTON_DELETE_BASE + slotIndices.get(di));
-                        return true;
-                    }
+                if (b == 0 && SongRowRenderer.hitAction(mx, my, rowX, rowY, rowW, rowH)) {
+                    handleButtonClick(MusicPlayerPlaylistMenu.BUTTON_DELETE_BASE + realSlot);
+                    return true;
+                }
+                if (b == 0) {
+                    handleButtonClick(MusicPlayerPlaylistMenu.BUTTON_SELECT_BASE + realSlot);
+                    return true;
                 }
                 return false;
             }
@@ -650,52 +803,80 @@ public class MusicPlayerPlaylistScreen extends AbstractContainerScreen<MusicPlay
     }
 
     private class LyricList extends ObjectSelectionList<LyricList.Entry> {
-        private List<Map.Entry<Float, String>> lyricLines = new ArrayList<>();
-        private List<Map.Entry<Float, String>> transformLines = new ArrayList<>();
-        private int currentLine = -1;
+        private String renderedIdentity = "";
+        private long renderedGeneration = Long.MIN_VALUE;
+        private ClientLyricStore.State renderedState;
+        private int currentLine = Integer.MIN_VALUE;
+        private boolean autoFollow = true;
+
         public LyricList(Minecraft mc, int w, int h, int top, int bottom, int ih) {
             super(mc, w, h, top, bottom, ih);
             this.setRenderBackground(false); this.setRenderTopAndBottom(false);
         }
         @Override public int getRowWidth() { return this.getWidth() - 16; }
         @Override protected int getScrollbarPosition() { return this.getLeft() + this.getWidth() - 6; }
+
         public void refresh() {
-            NetMusicListUtil.Lyric lyric = MusicInfoHud.getLyric();
-            lyricLines.clear(); transformLines.clear();
-            if (lyric != null && lyric.getLyric() != null) lyricLines.addAll(lyric.getLyric().entrySet());
-            if (lyric != null && lyric.getTransformLyric() != null) transformLines.addAll(lyric.getTransformLyric().entrySet());
+            String target = menu.getTargetId();
+            SongInfo song = getPlayingSongInfo();
+            ClientLyricStore.Snapshot snapshot = ClientLyricStore.bind(target, song);
             int tick = getPlayingTick();
-            float cs = tick >= 0 ? tick / 20.0f : 0;
-            currentLine = -1;
-            for (int i = 0; i < lyricLines.size(); i++) {
-                if (lyricLines.get(i).getKey() <= cs) currentLine = i; else break;
-            }
+            int line = ClientLyricStore.lineIndexAtTick(snapshot.data(), tick);
+            boolean identityChanged = !snapshot.identity().equals(renderedIdentity)
+                    || snapshot.generation() != renderedGeneration;
+            boolean stateChanged = snapshot.state() != renderedState;
+            if (!identityChanged && !stateChanged && line == currentLine) return;
+
+            double oldScroll = getScrollAmount();
+            renderedIdentity = snapshot.identity();
+            renderedGeneration = snapshot.generation();
+            renderedState = snapshot.state();
+            currentLine = line;
             this.clearEntries();
-            for (int i = 0; i < lyricLines.size(); i++) {
-                String o = lyricLines.get(i).getValue();
-                String t = i < transformLines.size() ? transformLines.get(i).getValue() : "";
-                this.addEntry(new Entry(o, t, i == currentLine));
+            if (snapshot.state() == ClientLyricStore.State.LOADING) {
+                this.addEntry(new Entry("歌词加载中…", false));
+            } else if (snapshot.state() == ClientLyricStore.State.FAILED) {
+                this.addEntry(new Entry("歌词加载失败", false));
+            } else if (snapshot.data().lines().isEmpty()) {
+                String empty = song != null && "apple".equals(song.source) ? "Apple Music 暂无歌词" : "暂无歌词";
+                this.addEntry(new Entry(empty, false));
+            } else {
+                int index = 0;
+                for (String text : snapshot.data().lines().values()) this.addEntry(new Entry(text, index++ == currentLine));
             }
-            if (currentLine >= 0 && this.getItemCount() > 0) this.centerScrollOn(this.getEntry(currentLine));
+            if (identityChanged) {
+                autoFollow = true;
+                if (currentLine >= 0 && currentLine < getItemCount()) centerScrollOn(getEntry(currentLine));
+                else setScrollAmount(0);
+            } else if (autoFollow && currentLine >= 0 && currentLine < getItemCount()) {
+                centerScrollOn(getEntry(currentLine));
+            } else setScrollAmount(oldScroll);
         }
+
+        @Override public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
+            boolean handled = super.mouseScrolled(mouseX, mouseY, delta);
+            if (handled) autoFollow = false;
+            return handled;
+        }
+
         private class Entry extends ObjectSelectionList.Entry<Entry> {
-            private final String text, translation; private final boolean isCurrent;
-            public Entry(String t, String tr, boolean c) { this.text = t != null ? t : ""; this.translation = tr != null ? tr : ""; this.isCurrent = c; }
-            @Override
-            public void render(GuiGraphics g, int i, int y, int x, int ew, int eh, int mx, int my, boolean h, float p) {
-                if (isCurrent) { g.fill(x, y - 1, x + ew, y + eh, 0x444ECDC4); g.fill(x, y - 1, x + 2, y + eh, ACCENT_CYAN); }
-                int tc = isCurrent ? ACCENT_CYAN : (h ? TEXT_PRIMARY : TEXT_SECONDARY);
-                int ty = y + 2;
-                if (!text.isEmpty()) {
-                    String d = text; int mw = ew - 8;
-                    if (font.width(d) > mw) d = font.plainSubstrByWidth(d, mw - 8) + "...";
-                    g.drawString(font, d, x + 8, ty, tc, false);
-                }
-                if (!translation.isEmpty()) {
-                    String d = translation; int mw = ew - 8;
-                    if (font.width(d) > mw) d = font.plainSubstrByWidth(d, mw - 8) + "...";
-                    g.drawString(font, d, x + 8, ty + 10, isCurrent ? 0xFFB8E0DC : TEXT_DIM, false);
-                }
+            private final String text;
+            private final boolean current;
+            Entry(String text, boolean current) { this.text = text == null ? "" : text; this.current = current; }
+            @Override public void render(GuiGraphics g, int index, int y, int x, int ew, int eh,
+                                         int mx, int my, boolean hovered, float pt) {
+                if (current) { g.fill(x, y - 1, x + ew, y + eh, 0x444ECDC4); g.fill(x, y - 1, x + 2, y + eh, ACCENT_CYAN); }
+                String original = text, translation = "";
+                int split = text.indexOf('\n');
+                if (split >= 0) { original = text.substring(0, split); translation = text.substring(split + 1); }
+                int color = current ? ACCENT_CYAN : (hovered ? TEXT_PRIMARY : TEXT_SECONDARY);
+                drawLyric(g, original, x + 8, y + 2, ew - 12, color);
+                if (!translation.isBlank()) drawLyric(g, translation, x + 8, y + 12, ew - 12, current ? 0xFFB8E0DC : TEXT_DIM);
+            }
+            private void drawLyric(GuiGraphics g, String value, int x, int y, int width, int color) {
+                String display = value;
+                if (font.width(display) > width) display = font.plainSubstrByWidth(display, Math.max(1, width - font.width("…"))) + "…";
+                g.drawString(font, display, x, y, color, false);
             }
             @Override public @NotNull Component getNarration() { return Component.literal(text); }
         }

@@ -1,93 +1,89 @@
 package com.mengsama.mod.mengsamanetmusic.api;
 
-import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
 
 import java.io.IOException;
-import java.io.Reader;
-import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class QqCredentialManager {
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-    private static volatile QqCredential credential;
-    private static volatile Path credentialFile;
+    private static final Gson JSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final AtomicReference<QqCredential> CURRENT = new AtomicReference<>();
+    private static final AtomicLong REVISION = new AtomicLong();
+    private static volatile Path storageFile;
 
-    private QqCredentialManager() {
-    }
+    private QqCredentialManager() {}
 
-    public static void init(Path configDir) {
-        Path dir = configDir.resolve("mengsamanetmusic");
-        try {
-            Files.createDirectories(dir);
-        } catch (IOException e) {
-            MengSamaNetMusic.LOGGER.error("Failed to create config directory", e);
-        }
-        credentialFile = dir.resolve("credential.json");
+    public static synchronized void init(Path configRoot) {
+        storageFile = configRoot.resolve("mengsamanetmusic").resolve("credential.json");
         load();
     }
 
-    public static void load() {
-        if (credentialFile == null || !Files.exists(credentialFile)) {
-            credential = null;
-            return;
-        }
-        try (Reader reader = Files.newBufferedReader(credentialFile, StandardCharsets.UTF_8)) {
-            credential = GSON.fromJson(reader, QqCredential.class);
-        } catch (Exception e) {
-            MengSamaNetMusic.LOGGER.error("Failed to load credential", e);
-            credential = null;
-        }
-    }
-
-    public static void save(QqCredential cred) {
-        credential = cred;
-        if (credentialFile == null) {
-            return;
-        }
-        try {
-            Files.createDirectories(credentialFile.getParent());
-            try (Writer writer = Files.newBufferedWriter(credentialFile, StandardCharsets.UTF_8)) {
-                GSON.toJson(cred, writer);
-            }
-        } catch (IOException e) {
-            MengSamaNetMusic.LOGGER.error("Failed to save credential", e);
-        }
-    }
-
-    public static void clear() {
-        credential = null;
-        if (credentialFile != null && Files.exists(credentialFile)) {
+    public static synchronized void load() {
+        QqCredential loaded = null;
+        Path file = storageFile;
+        if (file != null && Files.isRegularFile(file)) {
             try {
-                Files.delete(credentialFile);
-            } catch (IOException e) {
-                MengSamaNetMusic.LOGGER.error("Failed to delete credential file", e);
+                loaded = JSON.fromJson(Files.readString(file, StandardCharsets.UTF_8), QqCredential.class);
+                if (loaded != null && !loaded.isValid()) loaded = null;
+            } catch (Exception error) {
+                MengSamaNetMusic.LOGGER.warn("Ignoring unreadable QQ credential file {}", file, error);
             }
         }
+        publish(loaded);
     }
 
-    public static QqCredential getCredential() {
-        return credential;
-    }
-
-    public static boolean hasValidCredential() {
-        QqCredential cred = credential;
-        return cred != null && cred.isValid();
-    }
-
-    public static String getEffectiveCookie() {
-        QqCredential cred = credential;
-        if (cred != null && cred.isValid()) {
-            return cred.toCookieString();
+    public static synchronized void save(QqCredential credential) {
+        if (credential == null || !credential.isValid()) {
+            clear();
+            return;
         }
-        return "";
+        Path file = storageFile;
+        if (file != null) {
+            Path temporary = file.resolveSibling(file.getFileName() + ".tmp");
+            try {
+                Files.createDirectories(file.getParent());
+                Files.writeString(temporary, JSON.toJson(credential), StandardCharsets.UTF_8);
+                try {
+                    Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                } catch (IOException atomicMoveUnsupported) {
+                    Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } catch (IOException error) {
+                MengSamaNetMusic.LOGGER.error("Could not persist QQ credential", error);
+                try { Files.deleteIfExists(temporary); } catch (IOException ignored) {}
+            }
+        }
+        publish(credential);
     }
 
-    public static String getMusicId() {
-        QqCredential cred = credential;
-        return cred != null ? cred.getMusicId() : "";
+    public static synchronized void clear() {
+        Path file = storageFile;
+        if (file != null) {
+            try {
+                Files.deleteIfExists(file);
+            } catch (IOException error) {
+                MengSamaNetMusic.LOGGER.error("Could not remove QQ credential", error);
+            }
+        }
+        publish(null);
     }
+
+    private static void publish(QqCredential credential) {
+        CURRENT.set(credential);
+        REVISION.incrementAndGet();
+    }
+
+    public static QqCredential getCredential() { return CURRENT.get(); }
+    public static long revision() { return REVISION.get(); }
+    public static boolean hasValidCredential() { return Optional.ofNullable(CURRENT.get()).map(QqCredential::isValid).orElse(false); }
+    public static String getEffectiveCookie() { return Optional.ofNullable(CURRENT.get()).map(QqCredential::toCookieString).orElse(""); }
+    public static String getMusicId() { return Optional.ofNullable(CURRENT.get()).map(QqCredential::getMusicId).orElse(""); }
 }

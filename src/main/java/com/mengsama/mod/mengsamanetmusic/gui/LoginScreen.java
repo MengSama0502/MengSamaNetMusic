@@ -20,7 +20,6 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.FormattedCharSequence;
 
 import java.io.IOException;
@@ -30,8 +29,6 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 public class LoginScreen extends Screen {
-    private static final ResourceLocation REFRESH = new ResourceLocation(MengSamaNetMusic.MOD_ID, "textures/gui/refresh.png");
-    private static final ResourceLocation CHECK = new ResourceLocation(MengSamaNetMusic.MOD_ID, "textures/gui/check.png");
     private static final Gson GSON = new Gson();
 
     private final LinearLayout rootLayout;
@@ -78,12 +75,14 @@ public class LoginScreen extends Screen {
                 int imageWidth = 40;
                 if (!state.equals(QRState.SCAN_SUCCESS)) {
                     actionTip = Component.translatable("gui.mengsamanetmusic.login.qr_code.tip.reload").withStyle(ChatFormatting.BLACK).withStyle(ChatFormatting.BOLD);
-                    guiGraphics.blit(REFRESH, qrCodeImage.getX() + qrCodeImage.getWidth() / 2 - imageWidth / 2,
-                            qrCodeImage.getY() + 70, 0, 0, imageWidth, imageWidth, imageWidth, imageWidth);
+                    drawRefreshIcon(guiGraphics,
+                            qrCodeImage.getX() + qrCodeImage.getWidth() / 2,
+                            qrCodeImage.getY() + 70 + imageWidth / 2, imageWidth);
                 } else {
                     actionTip = Component.translatable("gui.mengsamanetmusic.login.qr_code.tip.confirm").withStyle(ChatFormatting.BLACK).withStyle(ChatFormatting.BOLD);
-                    guiGraphics.blit(CHECK, qrCodeImage.getX() + qrCodeImage.getWidth() / 2 - imageWidth / 2,
-                            qrCodeImage.getY() + 70, 0, 0, imageWidth, imageWidth, imageWidth, imageWidth);
+                    drawCheckIcon(guiGraphics,
+                            qrCodeImage.getX() + qrCodeImage.getWidth() / 2,
+                            qrCodeImage.getY() + 70 + imageWidth / 2, imageWidth);
                 }
                 int actionTipHeight = qrCodeImage.getY() + 50;
                 RenderUtil.drawCenteredStringNoShadow(guiGraphics, font, actionTip,
@@ -361,6 +360,37 @@ public class LoginScreen extends Screen {
             guiGraphics.drawString(font, text, editBox.getX() + 4,
                     editBox.getY() + (editBox.getHeight() - font.lineHeight) / 2 + 1, 0xFFAAAAAA);
         }
+    }
+
+    private static void drawCheckIcon(GuiGraphics graphics, int centerX, int centerY, int size) {
+        int thickness = Math.max(2, size / 10);
+        int color = 0xFF2E7D32;
+        for (int i = 0; i < size / 4; i++) {
+            graphics.fill(centerX - size / 3 + i, centerY + i - thickness,
+                    centerX - size / 3 + i + thickness, centerY + i + thickness, color);
+        }
+        for (int i = 0; i < size / 2; i++) {
+            graphics.fill(centerX - size / 12 + i, centerY + size / 4 - i - thickness,
+                    centerX - size / 12 + i + thickness, centerY + size / 4 - i + thickness, color);
+        }
+    }
+
+    private static void drawRefreshIcon(GuiGraphics graphics, int centerX, int centerY, int size) {
+        int color = 0xFF333333;
+        int radius = size / 3;
+        int thickness = Math.max(2, size / 12);
+        for (int y = -radius; y <= radius; y++) {
+            for (int x = -radius; x <= radius; x++) {
+                int distance = x * x + y * y;
+                if (distance <= radius * radius && distance >= (radius - thickness) * (radius - thickness)
+                        && !(x < 0 && y > 0)) {
+                    graphics.fill(centerX + x, centerY + y, centerX + x + 1, centerY + y + 1, color);
+                }
+            }
+        }
+        graphics.fill(centerX - radius - thickness, centerY, centerX - radius + thickness, centerY + size / 5, color);
+        graphics.fill(centerX - radius - thickness, centerY + size / 5 - thickness,
+                centerX - radius + size / 6, centerY + size / 5 + thickness, color);
     }
 
     @Override

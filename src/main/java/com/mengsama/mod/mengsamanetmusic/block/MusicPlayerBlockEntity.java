@@ -3,11 +3,9 @@ package com.mengsama.mod.mengsamanetmusic.block;
 import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
 import com.mengsama.mod.mengsamanetmusic.api.SongInfo;
 import com.mengsama.mod.mengsamanetmusic.init.ModBlockEntities;
-import com.mengsama.mod.mengsamanetmusic.item.MusicCDItem;
 import com.mengsama.mod.mengsamanetmusic.item.MusicListItem;
 import com.mengsama.mod.mengsamanetmusic.network.ModNetwork;
 import com.mengsama.mod.mengsamanetmusic.network.PlayMusicPacket;
-import com.mengsama.mod.mengsamanetmusic.util.NetMusicListUtil;
 import com.mengsama.mod.mengsamanetmusic.util.PlayMode;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -33,11 +31,6 @@ import org.jetbrains.annotations.NotNull;
 
 import org.jetbrains.annotations.Nullable;
 
-import java.net.HttpURLConnection;
-import java.net.URI;
-import java.net.URL;
-import java.util.concurrent.CompletableFuture;
-
 import software.bernie.geckolib.animatable.GeoBlockEntity;
 import software.bernie.geckolib.core.animatable.instance.AnimatableInstanceCache;
 import software.bernie.geckolib.core.animation.AnimatableManager;
@@ -51,6 +44,7 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
 
     private static final String CD_ITEMS_TAG = "ItemStacksCD";
     private static final String IS_PLAY_TAG = "IsPlay";
+    private static final String IS_PAUSED_TAG = "IsPaused";
     private static final String CURRENT_TIME_TAG = "CurrentTime";
     private static final String SIGNAL_TAG = "RedStoneSignal";
     private static final String PLAY_INDEX_TAG = "PlayIndex";
@@ -60,7 +54,7 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
     private final ItemStackHandler playerInv = new ItemStackHandler(SLOT_COUNT) {
         @Override
         public boolean isItemValid(int slot, @NotNull ItemStack stack) {
-            return stack.getItem() instanceof MusicCDItem || stack.getItem() instanceof MusicListItem;
+            return stack.getItem() instanceof MusicListItem;
         }
 
         @Override
@@ -76,10 +70,13 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
 
     private LazyOptional<IItemHandler> playerInvHandler;
     private boolean isPlay = false;
+    private boolean isPaused = false;
     private int currentTime;
     private boolean hasSignal = false;
     private int playIndex = 0;
     private PlayMode playMode = PlayMode.SEQUENTIAL;
+    private boolean autoAdvanceArmed;
+    private final java.util.concurrent.atomic.AtomicLong playRequestGeneration = new java.util.concurrent.atomic.AtomicLong();
 
     public MusicPlayerBlockEntity(BlockPos blockPos, BlockState blockState) {
         super(ModBlockEntities.MUSIC_PLAYER.get(), blockPos, blockState);
@@ -89,6 +86,7 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
     public void saveAdditional(CompoundTag compound) {
         compound.put(CD_ITEMS_TAG, playerInv.serializeNBT());
         compound.putBoolean(IS_PLAY_TAG, isPlay);
+        compound.putBoolean(IS_PAUSED_TAG, isPaused);
         compound.putInt(CURRENT_TIME_TAG, currentTime);
         compound.putBoolean(SIGNAL_TAG, hasSignal);
         compound.putInt(PLAY_INDEX_TAG, playIndex);
@@ -101,7 +99,9 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
         super.load(nbt);
         playerInv.deserializeNBT(nbt.getCompound(CD_ITEMS_TAG));
         isPlay = nbt.getBoolean(IS_PLAY_TAG);
+        isPaused = nbt.getBoolean(IS_PAUSED_TAG);
         currentTime = nbt.getInt(CURRENT_TIME_TAG);
+        autoAdvanceArmed = currentTime > 0;
         hasSignal = nbt.getBoolean(SIGNAL_TAG);
         playIndex = nbt.contains(PLAY_INDEX_TAG) ? nbt.getInt(PLAY_INDEX_TAG) : 0;
         playMode = nbt.contains(PLAY_MODE_TAG) ? PlayMode.getMode(nbt.getInt(PLAY_MODE_TAG)) : PlayMode.SEQUENTIAL;
@@ -136,7 +136,7 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
     }
 
     public void setPlayMode(PlayMode mode) {
-        this.playMode = mode;
+        this.playMode = mode == null ? PlayMode.SEQUENTIAL : mode;
         markDirty();
     }
 
@@ -157,50 +157,18 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
     }
 
     public void advanceToNext() {
-        int firstIndex = findFirstNonEmptyIndex();
-        int lastIndex = findLastNonEmptyIndex();
-        if (firstIndex < 0) return;
-
-        switch (playMode) {
-            case RANDOM -> {
-
-                int count = 0;
-                for (int i = 0; i < SLOT_COUNT; i++) {
-                    if (!playerInv.getStackInSlot(i).isEmpty()) count++;
-                }
-                if (count > 1) {
-                    int r = RandomSource.create().nextInt(count);
-                    for (int i = 0; i < SLOT_COUNT; i++) {
-                        if (!playerInv.getStackInSlot(i).isEmpty()) {
-                            if (r == 0) {
-                                playIndex = i;
-                                break;
-                            }
-                            r--;
-                        }
-                    }
-                }
-                markDirty();
-                return;
-            }
-            case SEQUENTIAL -> {
-                int next = playIndex + 1;
-
-                while (next <= lastIndex) {
-                    if (!playerInv.getStackInSlot(next).isEmpty()) {
-                        playIndex = next;
-                        markDirty();
-                        return;
-                    }
-                    next++;
-                }
-
-                playIndex = firstIndex;
-            }
-            case LOOP -> {
-
-            }
+        int[] counts = new int[SLOT_COUNT];
+        for (int i = 0; i < SLOT_COUNT; i++) {
+            ItemStack cd = playerInv.getStackInSlot(i);
+            counts[i] = cd.getItem() instanceof MusicListItem ? MusicListItem.getSongCount(cd) : (cd.isEmpty() ? 0 : 1);
         }
+        ItemStack current = playIndex >= 0 && playIndex < SLOT_COUNT ? playerInv.getStackInSlot(playIndex) : ItemStack.EMPTY;
+        int currentSong = current.getItem() instanceof MusicListItem ? MusicListItem.getSongIndex(current) : 0;
+        PlayMode.TrackPosition next = PlayMode.nextTrack(playMode, playIndex, currentSong, counts,
+                bound -> RandomSource.create().nextInt(bound));
+        playIndex = next.slotIndex();
+        ItemStack selected = playerInv.getStackInSlot(playIndex);
+        if (selected.getItem() instanceof MusicListItem) MusicListItem.setSongIndex(selected, next.songIndex());
         markDirty();
     }
 
@@ -245,28 +213,72 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
 
     public void setPlay(boolean play) {
         isPlay = play;
+        if (!play) isPaused = false;
+        markDirty();
+    }
+
+    public boolean isPaused() {
+        return isPaused;
+    }
+
+    public void setPaused(boolean paused) {
+        isPaused = paused && isPlay;
         markDirty();
     }
 
     public void setPlayToClient(SongInfo info) {
+        setPlayToClient(info, 0L, 0);
+    }
+
+    public void setPlayToClient(SongInfo info, long refreshNonce) {
+        setPlayToClient(info, refreshNonce, 0);
+    }
+
+    @Override
+    public void setPlayToClient(SongInfo info, int startSecond) {
+        setPlayToClient(info, 0L, startSecond, false);
+    }
+
+    @Override
+    public void seekToClient(SongInfo info, int startSecond, boolean paused) {
+        setPlayToClient(info, 0L, startSecond, paused);
+    }
+
+    private void setPlayToClient(SongInfo info, long refreshNonce, int startSecond) {
+        setPlayToClient(info, refreshNonce, startSecond, false);
+    }
+
+    private void setPlayToClient(SongInfo info, long refreshNonce, int startSecond, boolean preservePause) {
         if (level instanceof ServerLevel serverLevel) {
             MinecraftServer server = serverLevel.getServer();
             SongInfo clone = info.clone();
+            long requestGeneration = this.playRequestGeneration.incrementAndGet();
             this.isPlay = true;
+            this.isPaused = preservePause;
             this.markDirty();
-            resolveUrlAsync(clone).thenAcceptAsync(resolved -> {
+            com.mengsama.mod.mengsamanetmusic.item.MusicPlayerItem.resolveUrlAsync(clone).thenAcceptAsync(resolved -> {
                 try {
                     if (this.isRemoved()) return;
-                    if (!this.isPlay) return;
-                    this.setCurrentTime(resolved.songTime * 20 + 64);
+                    if (!this.isPlay || this.playRequestGeneration.get() != requestGeneration) return;
+                    ItemStack currentCd = this.getCurrentCd();
+                    SongInfo stable = com.mengsama.mod.mengsamanetmusic.item.MusicPlayerItem.stableSongInfo(resolved, clone);
+                    if (currentCd.getItem() instanceof MusicListItem) MusicListItem.setSongInfo(stable, currentCd);
+                    this.markDirty();
+                    int clampedStart = Math.max(0, Math.min(resolved.songTime, startSecond));
+                    this.setCurrentTime(Math.max(1, (resolved.songTime - clampedStart) * 20 + 64));
                     this.markDirty();
 
                     String rawUrl = info.songUrl;
                     String url = resolved.songUrl;
+                    String targetId = blockTargetId();
+                    com.mengsama.mod.mengsamanetmusic.network.PlaybackRefreshSessions.publish(targetId, requestGeneration, stable, targetId);
                     PlayMusicPacket msg = new PlayMusicPacket(
-                            worldPosition, url, rawUrl, resolved.songTime, resolved.songName, info.songId
+                            worldPosition, targetId, url, stable.rawUrl, resolved.songTime, resolved.songName, requestGeneration, refreshNonce, resolved, clampedStart
                     );
                     ModNetwork.sendToNearby(level, worldPosition, msg);
+                    if (preservePause) ModNetwork.sendToNearby(level, worldPosition,
+                            new com.mengsama.mod.mengsamanetmusic.network.PauseMusicPacketClient(
+                                    targetId, true, requestGeneration));
                 } catch (Exception e) {
                     MengSamaNetMusic.LOGGER.error("setPlayToClient error: {}", e.getMessage());
                 }
@@ -274,114 +286,12 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
         }
     }
 
-    private static CompletableFuture<SongInfo> resolveUrlAsync(SongInfo info) {
-        return CompletableFuture.supplyAsync(() -> {
-            String url = info.songUrl;
-            if (url == null || url.isBlank()) {
-                return info;
-            }
-
-            if (com.mengsama.mod.mengsamanetmusic.api.MetingApi.isMetingUrl(url)) {
-                MengSamaNetMusic.LOGGER.info("Using Meting API URL directly: {}", url);
-                return info;
-            }
-            if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                return info;
-            }
-            try {
-
-                if (url.contains("music.163.com") && url.contains("outer/url")) {
-                    long songId = extractSongId(url);
-                    if (songId > 0) {
-                        MengSamaNetMusic.LOGGER.info("Resolving song URL for id: {}", songId);
-
-                        String resolvedUrl = resolveRedirectUrl(url);
-                        if (resolvedUrl != null && !resolvedUrl.equals(url) && !resolvedUrl.contains("404")) {
-                            info.songUrl = resolvedUrl;
-                            MengSamaNetMusic.LOGGER.info("Resolved song URL via redirect: {} -> {}", url, resolvedUrl);
-                            return info;
-                        }
-
-                        String metingUrl = com.mengsama.mod.mengsamanetmusic.api.MetingApi.getSongUrl(songId);
-                        if (metingUrl != null && !metingUrl.isEmpty()) {
-                            info.songUrl = metingUrl;
-                            MengSamaNetMusic.LOGGER.info("Resolved VIP song URL via Meting API: {} -> {}", url, metingUrl);
-                            return info;
-                        }
-                        MengSamaNetMusic.LOGGER.warn("Failed to resolve URL for song id: {}", songId);
-                    }
-                } else {
-
-                    String resolvedUrl = resolveRedirectUrl(url);
-                    if (resolvedUrl != null && !resolvedUrl.equals(url)) {
-                        info.songUrl = resolvedUrl;
-                    }
-                }
-            } catch (Exception e) {
-                MengSamaNetMusic.LOGGER.warn("Failed to resolve URL for song: {}", url, e);
-            }
-            return info;
-        });
+    public long currentRequestGeneration() {
+        return playRequestGeneration.get();
     }
 
-    private static long extractSongId(String url) {
-        try {
-            int idIdx = url.indexOf("id=");
-            if (idIdx >= 0) {
-                String sub = url.substring(idIdx + 3);
-                int dot = sub.indexOf(".mp3");
-                if (dot > 0) sub = sub.substring(0, dot);
-                return Long.parseLong(sub);
-            }
-        } catch (Exception ignored) {
-        }
-        return -1;
-    }
-
-    private static String resolveRedirectUrl(String urlString) {
-
-        java.util.Map<String, String> netEaseHeaders = MengSamaNetMusic.NET_EASE_API.getRequestPropertyData();
-        String currentUrl = urlString;
-        for (int i = 0; i < 5; i++) {
-            try {
-                URL url = new URI(currentUrl).toURL();
-                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-                connection.setInstanceFollowRedirects(false);
-                connection.setConnectTimeout(5000);
-                connection.setReadTimeout(5000);
-
-                netEaseHeaders.forEach(connection::setRequestProperty);
-
-                int responseCode = connection.getResponseCode();
-                if (responseCode == HttpURLConnection.HTTP_MOVED_TEMP ||
-                        responseCode == HttpURLConnection.HTTP_MOVED_PERM ||
-                        responseCode == HttpURLConnection.HTTP_SEE_OTHER ||
-                        responseCode == 307 || responseCode == 308) {
-                    String location = connection.getHeaderField("Location");
-                    connection.disconnect();
-                    if (location != null) {
-                        if (location.startsWith("/")) {
-                            currentUrl = new URL(url.getProtocol(), url.getHost(), url.getPort(), location).toString();
-                        } else if (location.startsWith("http://") || location.startsWith("https://")) {
-                            currentUrl = location;
-                        } else {
-                            String base = url.getProtocol() + "://" + url.getHost();
-                            if (url.getPort() != -1 && url.getPort() != 80 && url.getPort() != 443) {
-                                base += ":" + url.getPort();
-                            }
-                            currentUrl = base + (location.startsWith("/") ? "" : "/") + location;
-                        }
-                        continue;
-                    }
-                }
-                connection.disconnect();
-                return currentUrl;
-            } catch (Exception e) {
-                MengSamaNetMusic.LOGGER.warn("Failed to resolve redirect for {}: {}", currentUrl, e.getMessage());
-                return currentUrl;
-            }
-        }
-        return currentUrl;
+    public String blockTargetId() {
+        return "block:" + level.dimension().location() + ":" + worldPosition.asLong();
     }
 
     public void markDirty() {
@@ -403,6 +313,7 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
 
     public void setCurrentTime(int time) {
         this.currentTime = time;
+        this.autoAdvanceArmed = time > 0;
     }
 
     public int getCurrentTime() {
@@ -429,28 +340,20 @@ public class MusicPlayerBlockEntity extends BlockEntity implements IMusicPlayerB
     }
 
     public static void tick(Level level, BlockPos blockPos, BlockState blockState, MusicPlayerBlockEntity te) {
+        if (level.isClientSide || !te.isPlay() || te.isPaused()) return;
         te.tickTime();
-        if (0 < te.getCurrentTime() && te.getCurrentTime() < 16 && te.getCurrentTime() % 5 == 0) {
+        if (te.getCurrentTime() == 0 && te.autoAdvanceArmed) {
+            te.autoAdvanceArmed = false;
             if (blockState.getValue(CYCLE_DISABLE)) {
                 te.setPlay(false);
                 te.markDirty();
             } else {
-                int prevPlayIndex = te.playIndex;
                 te.advanceToNext();
                 ItemStack currentCd = te.getCurrentCd();
                 if (currentCd.isEmpty()) {
                     return;
                 }
-                SongInfo songInfo;
-                if (currentCd.getItem() instanceof MusicListItem) {
-
-                    if (te.playIndex == prevPlayIndex) {
-                        MusicListItem.nextMusic(currentCd);
-                    }
-                    songInfo = MusicListItem.getSongInfo(currentCd);
-                } else {
-                    songInfo = MusicCDItem.getSongInfo(currentCd);
-                }
+                SongInfo songInfo = MusicListItem.getSongInfo(currentCd);
                 if (songInfo != null) {
                     te.setPlayToClient(songInfo);
                 }

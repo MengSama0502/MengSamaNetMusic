@@ -15,7 +15,7 @@ import net.minecraftforge.network.simple.SimpleChannel;
 import java.util.Optional;
 
 public class ModNetwork {
-    private static final String VERSION = "1";
+    private static final String VERSION = "3";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(MengSamaNetMusic.MOD_ID, "network"),
@@ -32,16 +32,7 @@ public class ModNetwork {
                 Optional.of(NetworkDirection.PLAY_TO_SERVER));
         CHANNEL.registerMessage(id++, PlayerPlayMusicPacket.class,
                 PlayerPlayMusicPacket::encode, PlayerPlayMusicPacket::decode, PlayerPlayMusicPacket::handle,
-                Optional.empty());
-        CHANNEL.registerMessage(id++, MusicListDataPacket.class,
-                MusicListDataPacket::encode, MusicListDataPacket::decode, MusicListDataPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_SERVER));
-        CHANNEL.registerMessage(id++, DeleteMusicDataPacket.class,
-                DeleteMusicDataPacket::encode, DeleteMusicDataPacket::decode, DeleteMusicDataPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_SERVER));
-        CHANNEL.registerMessage(id++, MoveMusicDataPacket.class,
-                MoveMusicDataPacket::encode, MoveMusicDataPacket::decode, MoveMusicDataPacket::handle,
-                Optional.of(NetworkDirection.PLAY_TO_SERVER));
+                Optional.of(NetworkDirection.PLAY_TO_CLIENT));
         CHANNEL.registerMessage(id++, UpdateMusicTickPacket.class,
                 UpdateMusicTickPacket::encode, UpdateMusicTickPacket::decode, UpdateMusicTickPacket::handle,
                 Optional.of(NetworkDirection.PLAY_TO_SERVER));
@@ -61,8 +52,29 @@ public class ModNetwork {
         CHANNEL.registerMessage(id++, StopMusicPacketClient.class,
                 StopMusicPacketClient::encode, StopMusicPacketClient::decode, StopMusicPacketClient::handle,
                 Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(id++, PauseMusicPacketClient.class,
+                PauseMusicPacketClient::encode, PauseMusicPacketClient::decode, PauseMusicPacketClient::handle,
+                Optional.of(NetworkDirection.PLAY_TO_CLIENT));
         CHANNEL.registerMessage(id++, SyncVipCookiePacket.class,
                 SyncVipCookiePacket::encode, SyncVipCookiePacket::decode, SyncVipCookiePacket::handle,
+                Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(id++, OpenMaidMusicPacket.class,
+                OpenMaidMusicPacket::encode, OpenMaidMusicPacket::decode, OpenMaidMusicPacket::handle,
+                Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(id++, MaidDeviceSyncPacket.class,
+                MaidDeviceSyncPacket::encode, MaidDeviceSyncPacket::decode, MaidDeviceSyncPacket::handle,
+                Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+        CHANNEL.registerMessage(id++, ReturnToMaidGuiPacket.class,
+                ReturnToMaidGuiPacket::encode, ReturnToMaidGuiPacket::decode, ReturnToMaidGuiPacket::handle,
+                Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(id++, RefreshPlaybackPacket.class,
+                RefreshPlaybackPacket::encode, RefreshPlaybackPacket::decode, RefreshPlaybackPacket::handle,
+                Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(id++, SeekPlaybackPacket.class,
+                SeekPlaybackPacket::encode, SeekPlaybackPacket::decode, SeekPlaybackPacket::handle,
+                Optional.of(NetworkDirection.PLAY_TO_SERVER));
+        CHANNEL.registerMessage(id++, PlayerHudVisibilityPacket.class,
+                PlayerHudVisibilityPacket::encode, PlayerHudVisibilityPacket::decode, PlayerHudVisibilityPacket::handle,
                 Optional.of(NetworkDirection.PLAY_TO_CLIENT));
     }
 

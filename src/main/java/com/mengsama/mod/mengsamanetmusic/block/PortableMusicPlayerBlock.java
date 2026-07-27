@@ -3,7 +3,6 @@ package com.mengsama.mod.mengsamanetmusic.block;
 import com.mengsama.mod.mengsamanetmusic.api.SongInfo;
 import com.mengsama.mod.mengsamanetmusic.init.ModItems;
 import com.mengsama.mod.mengsamanetmusic.init.ModBlockEntities;
-import com.mengsama.mod.mengsamanetmusic.item.MusicCDItem;
 import com.mengsama.mod.mengsamanetmusic.item.MusicListItem;
 import com.mengsama.mod.mengsamanetmusic.network.ModNetwork;
 import com.mengsama.mod.mengsamanetmusic.network.StopMusicPacketClient;
@@ -126,12 +125,7 @@ public class PortableMusicPlayerBlock extends HorizontalDirectionalBlock impleme
                         player.markDirty();
                         return;
                     }
-                    SongInfo songInfo;
-                    if (currentCd.getItem() instanceof MusicListItem) {
-                        songInfo = MusicListItem.getSongInfo(currentCd);
-                    } else {
-                        songInfo = MusicCDItem.getSongInfo(currentCd);
-                    }
+                    SongInfo songInfo = MusicListItem.getSongInfo(currentCd);
                     if (songInfo != null) {
                         player.setPlayToClient(songInfo);
                     }
@@ -153,10 +147,10 @@ public class PortableMusicPlayerBlock extends HorizontalDirectionalBlock impleme
         }
 
         ItemStack heldItem = playerIn.getMainHandItem();
-        boolean isCD = heldItem.getItem() instanceof MusicCDItem || heldItem.getItem() instanceof MusicListItem;
+        boolean isPlaylist = heldItem.getItem() instanceof MusicListItem;
 
         if (!worldIn.isClientSide) {
-            if (isCD) {
+            if (isPlaylist) {
                 for (int i = 0; i < musicPlayer.getPlayerInv().getSlots(); i++) {
                     if (musicPlayer.getPlayerInv().getStackInSlot(i).isEmpty()) {
                         ItemStack copy = heldItem.copy();
@@ -189,7 +183,7 @@ public class PortableMusicPlayerBlock extends HorizontalDirectionalBlock impleme
             if (blockEntity instanceof PortableMusicPlayerBlockEntity musicPlayer) {
                 if (!level.isClientSide) {
 
-                    ModNetwork.sendToNearby(level, pos, new StopMusicPacketClient(-1, ""));
+                    ModNetwork.sendToNearby(level, pos, new StopMusicPacketClient("block:" + level.dimension().location() + ":" + pos.asLong()));
 
                     if (!isMoving) {
                         ItemStack dropStack = new ItemStack(ModItems.MUSIC_PLAYER.get());

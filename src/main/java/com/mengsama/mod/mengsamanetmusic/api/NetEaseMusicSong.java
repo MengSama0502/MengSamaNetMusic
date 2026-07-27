@@ -34,6 +34,9 @@ public class NetEaseMusicSong {
         @SerializedName(value = "artists", alternate = "ar")
         private List<Artist> artists;
 
+        @SerializedName(value = "album", alternate = "al")
+        private Album album;
+
         public long getId() {
             return id;
         }
@@ -65,11 +68,23 @@ public class NetEaseMusicSong {
             artists.forEach(artist -> artistNames.add(artist.name));
             return artistNames;
         }
+
+        public String getAlbumName() { return album == null || album.name == null ? "" : album.name; }
+        public String getAlbumPicUrl() { return album == null || album.picUrl == null ? "" : album.picUrl; }
+    }
+
+    private static class Album {
+        @SerializedName("name") private String name;
+        @SerializedName("picUrl") private String picUrl;
     }
 
     private static class Artist {
         @SerializedName("name")
         private String name;
+    }
+
+    public List<Song> getSongs() {
+        return song == null ? Collections.emptyList() : Collections.unmodifiableList(song);
     }
 
     @Nullable

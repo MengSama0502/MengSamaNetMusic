@@ -8,16 +8,10 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.RandomSource;
-import net.minecraft.world.InteractionHand;
-import net.minecraft.world.InteractionResult;
-import net.minecraft.world.InteractionResultHolder;
-import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.TooltipFlag;
-import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.Level;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
 import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -26,11 +20,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-public class MusicListItem extends MusicCDItem {
+public class MusicListItem extends Item {
     private static final String LIST_KEY = "NetMusicSongInfoList";
 
     public MusicListItem() {
-        super();
+        super(new Properties().stacksTo(1));
     }
 
     @Override
@@ -147,8 +141,17 @@ public class MusicListItem extends MusicCDItem {
         }
     }
 
+    public static boolean containsSong(ItemStack stack, SongInfo info) {
+        if (info == null) return false;
+        for (SongInfo existing : getSongInfoList(stack)) {
+            if (info.sameIdentity(existing)) return true;
+        }
+        return false;
+    }
+
     public static ItemStack addSongInfo(SongInfo info, ItemStack stack) {
         if (stack.getItem() instanceof MusicListItem) {
+            if (containsSong(stack, info)) return stack;
             CompoundTag tag = stack.getOrCreateTag();
             ListTag listTag = tag.contains(LIST_KEY) ? tag.getList(LIST_KEY, Tag.TAG_COMPOUND) : new ListTag();
             CompoundTag sn = new CompoundTag();
@@ -178,7 +181,7 @@ public class MusicListItem extends MusicCDItem {
                 listTag.add(sn);
                 tag.put(LIST_KEY, listTag);
 
-                setSongIndex(stack, listTag.size());
+                setSongIndex(stack, listTag.size() - 1);
                 stack.setTag(tag);
                 return stack;
             }
@@ -209,26 +212,26 @@ public class MusicListItem extends MusicCDItem {
         name = Component.translatable("tooltip.mengsamanetmusic.play_mode").getString();
         text = "§a▍ §7" + name + ": §6" + getPlayMode(stack).getName().getString();
         if (getSongInfoList(stack).isEmpty()) {
-            componentList.add(Component.translatable("tooltips.mengsamanetmusic.cd.empty").withStyle(ChatFormatting.RED));
+            componentList.add(Component.translatable("tooltips.mengsamanetmusic.playlist.empty").withStyle(ChatFormatting.RED));
         }
 
         componentList.add(Component.literal(text));
         SongInfo info = getSongInfo(stack);
         if (info != null) {
             if (info.transName != null && !info.transName.isEmpty()) {
-                name = Component.translatable("tooltips.mengsamanetmusic.cd.trans_name").getString();
+                name = Component.translatable("tooltips.mengsamanetmusic.playlist.trans_name").getString();
                 text = "§a▍ §7" + name + ": §6" + info.transName;
                 componentList.add(Component.literal(text));
             }
 
             if (info.artists != null && !info.artists.isEmpty()) {
                 text = StringUtils.join(info.artists, " | ");
-                name = Component.translatable("tooltips.mengsamanetmusic.cd.artists").getString();
+                name = Component.translatable("tooltips.mengsamanetmusic.playlist.artists").getString();
                 text = "§a▍ §7" + name + ": §3" + text;
                 componentList.add(Component.literal(text));
             }
 
-            name = Component.translatable("tooltips.mengsamanetmusic.cd.time").getString();
+            name = Component.translatable("tooltips.mengsamanetmusic.playlist.time").getString();
             text = "§a▍ §7" + name + ": §5" + getSongTime(info.songTime);
             componentList.add(Component.literal(text));
         }
@@ -239,7 +242,7 @@ public class MusicListItem extends MusicCDItem {
         int sec = songTime % 60;
         String minStr = min <= 9 ? "0" + min : "" + min;
         String secStr = sec <= 9 ? "0" + sec : "" + sec;
-        String format = Component.translatable("tooltips.mengsamanetmusic.cd.time.format").getString();
+        String format = Component.translatable("tooltips.mengsamanetmusic.playlist.time.format").getString();
         return String.format(format, minStr, secStr);
     }
 
@@ -256,58 +259,6 @@ public class MusicListItem extends MusicCDItem {
         CompoundTag tag = stack.getOrCreateTag();
         tag.putInt("play_mode", mode.ordinal());
         stack.setTag(tag);
-    }
-
-    @Override
-    public @NotNull InteractionResult useOn(UseOnContext context) {
-        if (context.getPlayer() == null) {
-            return InteractionResult.PASS;
-        }
-        ItemStack stack = context.getPlayer().getMainHandItem();
-        if (!(stack.getItem() instanceof MusicListItem)) {
-            return InteractionResult.PASS;
-        }
-
-        var blockState = context.getLevel().getBlockState(context.getClickedPos());
-        boolean isMusicPlayer = blockState.getBlock() instanceof com.mengsama.mod.mengsamanetmusic.block.MusicPlayerBlock;
-
-        if (isMusicPlayer) {
-
-            List<SongInfo> songs = getSongInfoList(stack);
-            if (!songs.isEmpty() && getSongIndex(stack) >= songs.size()) {
-                setSongIndex(stack, 0);
-            }
-            return InteractionResult.PASS;
-        }
-        if (context.getLevel().isClientSide) {
-            openSelectionScreen(stack);
-        }
-        return InteractionResult.SUCCESS;
-    }
-
-    @Override
-    public @NotNull InteractionResultHolder<ItemStack> use(@NotNull Level level, @NotNull Player player, @NotNull InteractionHand hand) {
-        ItemStack stack = player.getItemInHand(hand);
-        if (!(stack.getItem() instanceof MusicListItem)) {
-            return InteractionResultHolder.pass(stack);
-        }
-        if (level.isClientSide) {
-            openSelectionScreen(stack);
-        }
-        return InteractionResultHolder.sidedSuccess(stack, level.isClientSide);
-    }
-
-    @OnlyIn(Dist.CLIENT)
-    private void openSelectionScreen(ItemStack stack) {
-        List<SongInfo> songs = getSongInfoList(stack);
-        int currentIdx = getSongIndex(stack);
-        if (songs.isEmpty()) {
-
-            currentIdx = 0;
-        } else if (currentIdx < 0 || currentIdx >= songs.size()) {
-            currentIdx = 0;
-        }
-        com.mengsama.mod.mengsamanetmusic.gui.MusicSelectionScreen.open(songs, getPlayMode(stack), currentIdx);
     }
 
     @Override

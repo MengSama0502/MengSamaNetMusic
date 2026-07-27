@@ -1,6 +1,5 @@
 package com.mengsama.mod.mengsamanetmusic.gui;
 
-import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
@@ -9,10 +8,8 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.layouts.LinearLayout;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.ResourceLocation;
 
 public class LoginSuccessScreen extends Screen {
-    private static final ResourceLocation CHECK = new ResourceLocation(MengSamaNetMusic.MOD_ID, "textures/gui/check.png");
 
     private final LinearLayout rootLayout;
     private final Button checkImage;
@@ -52,9 +49,22 @@ public class LoginSuccessScreen extends Screen {
     @Override
     public void render(GuiGraphics pGuiGraphics, int pMouseX, int pMouseY, float pPartialTick) {
         super.renderBackground(pGuiGraphics);
-        pGuiGraphics.blit(CHECK, checkImage.getX(), checkImage.getY(), 0, 0, 50, 50, 50, 50);
+        drawCheckIcon(pGuiGraphics, checkImage.getX(), checkImage.getY(), 50);
         pGuiGraphics.drawString(font, text, loginSuccessText.getX(), loginSuccessText.getY(), ChatFormatting.GREEN.getColor());
         super.render(pGuiGraphics, pMouseX, pMouseY, pPartialTick);
+    }
+
+    private static void drawCheckIcon(GuiGraphics graphics, int x, int y, int size) {
+        int thickness = Math.max(2, size / 10);
+        int color = 0xFF2E7D32;
+        for (int i = 0; i < size / 4; i++) {
+            graphics.fill(x + size / 5 + i, y + size / 2 + i - thickness,
+                    x + size / 5 + i + thickness, y + size / 2 + i + thickness, color);
+        }
+        for (int i = 0; i < size / 2; i++) {
+            graphics.fill(x + size / 3 + i, y + size / 2 + size / 4 - i - thickness,
+                    x + size / 3 + i + thickness, y + size / 2 + size / 4 - i + thickness, color);
+        }
     }
 
     @Override

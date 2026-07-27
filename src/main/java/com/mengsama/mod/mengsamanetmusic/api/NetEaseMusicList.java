@@ -88,6 +88,9 @@ public class NetEaseMusicList {
         @SerializedName("name")
         private String name;
 
+        @SerializedName("picUrl")
+        private String picUrl;
+
         public long getId() {
             return id;
         }
@@ -104,12 +107,19 @@ public class NetEaseMusicList {
         @SerializedName("name")
         private String name;
 
+        @SerializedName("picUrl")
+        private String picUrl;
+
         public long getId() {
             return id;
         }
 
         public String getName() {
             return name;
+        }
+
+        public String getPicUrl() {
+            return picUrl;
         }
     }
 }

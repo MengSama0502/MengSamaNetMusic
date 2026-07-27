@@ -30,7 +30,9 @@ public class PlayerRemoveSongPacket {
                 ServerPlayer sender = context.getSender();
                 if (sender == null) return;
 
-                ItemStack playerItem = MusicPlayerItem.findMusicPlayerItem(sender);
+                com.mengsama.mod.mengsamanetmusic.gui.MusicPlayerMenu menu =
+                        sender.containerMenu instanceof com.mengsama.mod.mengsamanetmusic.gui.MusicPlayerMenu m ? m : null;
+                ItemStack playerItem = menu != null ? menu.resolveValidatedDevice(sender) : ItemStack.EMPTY;
                 if (playerItem.isEmpty()) return;
 
                 NonNullList<ItemStack> cds = MusicPlayerItem.loadAllCds(playerItem);
@@ -46,13 +48,16 @@ public class PlayerRemoveSongPacket {
                     } else if (wasCurrentSong) {
 
                         ModNetwork.CHANNEL.send(
-                                net.minecraftforge.network.PacketDistributor.ALL.noArg(),
-                                new StopMusicPacketClient(sender.getId(), ""));
+                                net.minecraftforge.network.PacketDistributor.TRACKING_ENTITY_AND_SELF.with(() -> sender),
+                                new StopMusicPacketClient(menu != null ? menu.getTargetId()
+                                        : com.mengsama.mod.mengsamanetmusic.item.MusicPlayerItem.targetId(sender, playerItem)));
                     }
 
                     try {
                         sender.getInventory().setChanged();
-                        if (sender.containerMenu != null) {
+                        if (menu != null) {
+                            menu.syncAuthoritativeState(sender);
+                        } else if (sender.containerMenu != null) {
                             sender.containerMenu.broadcastChanges();
                         }
                     } catch (Exception ignored) {}

@@ -1,339 +1,328 @@
 package com.mengsama.mod.mengsamanetmusic.api;
 
-import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
-import com.mengsama.mod.mengsamanetmusic.util.NetWorker;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
+import com.mengsama.mod.mengsamanetmusic.util.NetWorker;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.URL;
 import java.net.URLConnection;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.InflaterInputStream;
 
 public final class QqMusicUtils {
-    private static final String DEFAULT_SIP = "http://ws.stream.qqmusic.qq.com/";
-    private static final FileCandidate[] QUALITY_CANDIDATES = new FileCandidate[]{
-            new FileCandidate("F000", "flac"),
-            new FileCandidate("M800", "mp3"),
-            new FileCandidate("M500", "mp3"),
-            new FileCandidate("RS02", "mp3"),
-            new FileCandidate("C600", "m4a"),
-            new FileCandidate("C400", "m4a"),
-            new FileCandidate("C200", "m4a"),
-            new FileCandidate("C100", "m4a")
-    };
+    private static final String MUSICU = "https://u6.y.qq.com/cgi-bin/musicu.fcg";
+    private static final String DETAIL_MUSICU = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+    private static final String FALLBACK_STREAM_ROOT = "http://ws.stream.qqmusic.qq.com/";
+    private static final List<MediaFormat> FORMATS = List.of(
+            new MediaFormat("F000", "flac"), new MediaFormat("M800", "mp3"),
+            new MediaFormat("M500", "mp3"), new MediaFormat("RS02", "mp3"),
+            new MediaFormat("C600", "m4a"), new MediaFormat("C400", "m4a"),
+            new MediaFormat("C200", "m4a"), new MediaFormat("C100", "m4a"));
 
-    private QqMusicUtils() {
+    private QqMusicUtils() {}
+
+    public static List<QqSearchResult> search(String query) throws IOException {
+        if (query == null || query.isBlank()) return List.of();
+        JsonObject parameters = new JsonObject();
+        parameters.addProperty("grp", 1);
+        parameters.addProperty("num_per_page", 50);
+        parameters.addProperty("page_num", 1);
+        parameters.addProperty("query", query.trim());
+        parameters.addProperty("search_type", 0);
+        JsonObject request = serviceCall("music.search.SearchCgiService", "DoSearchForQQMusicDesktop", parameters);
+        JsonObject envelope = envelope("1859");
+        envelope.add("req", request);
+        return parseSearchResponse(sendJson(MUSICU, envelope, browserHeaders(effectiveCookie())), "req");
     }
 
-    public static List<QqSearchResult> search(String query) throws Exception {
-        if (query == null || query.isBlank()) {
-            return Collections.emptyList();
-        }
-        var headers = new HashMap<String, String>() {{
-            put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0");
-            put("Accept", "application/json, text/plain, */*");
-            put("Accept-Language", "zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2");
-            put("Content-Type", "application/json;charset=utf-8");
-            put("Referer", "https://y.qq.com/");
-        }};
-        String body = "{\"req_1\":{\"method\":\"DoSearchForQQMusicDesktop\",\"module\":\"music.search.SearchCgiService\",\"param\":{\"grp\":1,\"num_per_page\":10,\"page_num\":1,\"query\":\"%s\",\"search_type\":0}}}".formatted(query);
-        var response = postJson("https://u.y.qq.com/cgi-bin/musicu.fcg", body, headers);
-        var tree = JsonParser.parseString(response).getAsJsonObject();
-        var bodyData = tree.getAsJsonObject("req_1").getAsJsonObject("data").getAsJsonObject("body");
-        if (bodyData == null) {
-            return Collections.emptyList();
-        }
-        var songList = bodyData.getAsJsonObject("song").getAsJsonArray("list");
-        List<QqSearchResult> results = new ArrayList<>();
-        for (JsonElement element : songList) {
-            var song = element.getAsJsonObject();
-            String mid = song.get("mid").getAsString();
-            String name = song.get("name").getAsString();
-            String singer = "";
-            var singerArray = song.getAsJsonArray("singer");
-            if (singerArray != null && !singerArray.isEmpty()) {
-                singer = singerArray.get(0).getAsJsonObject().get("name").getAsString();
+    static List<QqSearchResult> parseSearchResponse(String payload, String requestKey) {
+        try {
+            JsonObject root = JsonParser.parseString(Objects.requireNonNullElse(payload, "")).getAsJsonObject();
+            JsonObject response = object(root, requestKey);
+            JsonObject data = object(response, "data");
+            JsonObject body = object(data, "body");
+            JsonObject songSection = object(body, "song");
+            JsonArray songs = array(songSection, "list");
+            if (number(root, "code", -1) != 0 || number(response, "code", 0) != 0 || songs == null) return List.of();
+            List<QqSearchResult> decoded = new ArrayList<>();
+            for (JsonElement element : songs) {
+                if (!element.isJsonObject()) continue;
+                SongInfo song = decodeTrack(element.getAsJsonObject());
+                if (song == null || song.providerId.isBlank() || song.songName.isBlank()) continue;
+                decoded.add(new QqSearchResult(song.providerId, song.songName, String.join("/", song.artists), song.vip,
+                        song.albumMid, text(object(element.getAsJsonObject(), "album"), "pmId"), song.coverUrl,
+                        song.albumName, song.songTime));
             }
-            int interval = song.get("interval").getAsInt();
-            boolean vip = false;
-            if (song.has("pay")) {
-                vip = song.getAsJsonObject("pay").get("pay_play").getAsInt() == 1;
-            }
-            results.add(new QqSearchResult(mid, name, singer, vip));
+            return List.copyOf(decoded);
+        } catch (RuntimeException malformed) {
+            MengSamaNetMusic.LOGGER.debug("Malformed QQ search response", malformed);
+            return List.of();
         }
-        return results;
     }
 
-    public static SongInfo resolveSong(String input, String preferredCookie, int qualityOffset) throws Exception {
-        boolean hasCookie = preferredCookie != null && !preferredCookie.isBlank();
-        String uin = extractUinFromCookie(preferredCookie);
-        TrackInfo trackInfo = getTrackInfoByMid(input, preferredCookie);
-        String mediaMid = trackInfo.mediaMid;
-        var headers = new HashMap<String, String>() {{
-            put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0");
-            put("Accept", "application/json, text/plain, */*");
-            put("Accept-Language", "zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2");
-            put("Content-Type", "application/json;charset=utf-8");
-            put("Sec-Fetch-Dest", "empty");
-            put("Sec-Fetch-Mode", "cors");
-            put("Sec-Fetch-Site", "same-origin");
-            put("Referer", "https://y.qq.com/");
-        }};
-        if (hasCookie) {
-            headers.put("Cookie", preferredCookie);
-        }
-
-        FileCandidate[] candidates = qualityOffset > 0
-                ? java.util.Arrays.copyOfRange(QUALITY_CANDIDATES, qualityOffset, QUALITY_CANDIDATES.length)
-                : QUALITY_CANDIDATES;
-
-        for (int i = 0; i < candidates.length; i++) {
-            FileCandidate[] singleCandidate = new FileCandidate[]{candidates[i]};
-            try {
-                JsonObject vkeyData = requestVkeyData(input, mediaMid, headers, singleCandidate, uin);
-                String baseUrl = resolveBaseUrl(vkeyData);
-                String songPurl = selectBestPurl(vkeyData.getAsJsonArray("midurlinfo"));
-                if (songPurl != null && !songPurl.isBlank()) {
-                    SongInfo data = new SongInfo();
-                    data.songUrl = baseUrl + songPurl;
-                    data.songName = trackInfo.songName;
-                    data.songTime = trackInfo.interval;
-                    data.vip = trackInfo.vip;
-                    MengSamaNetMusic.LOGGER.info("QQ Music resolved (candidate {} {}): {} -> {}",
-                            i, candidates[i].prefix, data.songName, data.songUrl);
-                    return data;
-                }
-                MengSamaNetMusic.LOGGER.debug("QQ Music candidate {} {} returned empty purl",
-                        i, candidates[i].prefix);
-            } catch (Exception e) {
-                MengSamaNetMusic.LOGGER.warn("QQ Music candidate {} {} failed: {}",
-                        i, candidates[i].prefix, e.getMessage());
+    public static SongInfo resolveSong(String songMid, String cookie, int qualityOffset) throws IOException {
+        if (songMid == null || songMid.isBlank()) throw new IOException("QQ song MID is missing");
+        SongInfo song = fetchTrack(songMid, cookie);
+        JsonObject track = requestTrackObject(songMid, cookie);
+        String mediaMid = text(object(track, "file"), "media_mid");
+        if (mediaMid.isBlank()) mediaMid = songMid;
+        String uin = cookieValue(cookie, "uin", "wxuin", "o2_uin");
+        if (uin.isBlank()) uin = "0";
+        int start = Math.max(0, Math.min(qualityOffset, FORMATS.size() - 1));
+        Map<String, String> headers = browserHeaders(cookie);
+        for (MediaFormat format : FORMATS.subList(start, FORMATS.size())) {
+            JsonObject data = requestPlayback(songMid, mediaMid, uin, format, headers);
+            String purl = firstPlayablePath(array(data, "midurlinfo"));
+            if (!purl.isBlank()) {
+                String streamRoot = firstString(array(data, "sip"), FALLBACK_STREAM_ROOT);
+                song.songUrl = joinUrl(streamRoot, purl);
+                song.resolvedMediaUrl = song.songUrl;
+                song.playbackHeaders.putAll(playbackHeaders(cookie));
+                return song;
             }
         }
-
-        if (trackInfo.vip && !hasCookie) {
-            throw new RuntimeException("VIP song requires cookie for playback. Please login via Phone screen or set QQVipCookie in config.");
-        }
-        throw new RuntimeException("No playable URL found for mid=" + input + " (vip=" + trackInfo.vip + ", hasCookie=" + hasCookie + ")");
-    }
-
-    private static String extractUinFromCookie(String cookie) {
-        if (cookie == null || cookie.isBlank()) {
-            return "0";
-        }
-
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(?:^|;\\s*)uin=(\\d+)");
-        java.util.regex.Matcher matcher = pattern.matcher(cookie);
-        if (matcher.find()) {
-            return matcher.group(1);
-        }
-
-        pattern = java.util.regex.Pattern.compile("(?:^|;\\s*)(?:wxuin|o2_uin)=(\\d+)");
-        matcher = pattern.matcher(cookie);
-        if (matcher.find()) {
-            return matcher.group(1);
-        }
-        return "0";
+        if (song.vip && (cookie == null || cookie.isBlank())) throw new IOException("QQ VIP song requires a login cookie");
+        throw new IOException("QQ Music returned no playable URL for " + songMid);
     }
 
     public static SongNameData getSongNameByMid(String mid) {
-        TrackInfo info = getTrackInfoByMid(mid, null);
-        return new SongNameData(info.songName, info.interval);
-    }
-
-    private static TrackInfo getTrackInfoByMid(String mid, String preferredCookie) {
         try {
-            var headers = new HashMap<String, String>() {{
-                put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0");
-                put("Accept", "application/json, text/plain, */*");
-                put("Accept-Language", "zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2");
-                put("Content-Type", "application/json;charset=utf-8");
-                put("Sec-Fetch-Dest", "empty");
-                put("Sec-Fetch-Mode", "cors");
-                put("Sec-Fetch-Site", "same-origin");
-                put("Referer", "https://y.qq.com/");
-            }};
-            if (preferredCookie != null && !preferredCookie.isBlank()) {
-                headers.put("Cookie", preferredCookie);
-            }
-            var response = postJson("https://u.y.qq.com/cgi-bin/musicu.fcg", """
-                {"req_1":{"module":"music.pf_song_detail_svr","method":"get_song_detail","param":{"song_mid":"%s","song_id":0},"loginUin":"0","comm":{"uin":"0","format":"json","ct":24,"cv":0}}}
-                """.formatted(mid), headers);
-            var tree = JsonParser.parseString(response).getAsJsonObject();
-            var trackInfo = tree.getAsJsonObject("req_1")
-                    .getAsJsonObject("data")
-                    .getAsJsonObject("track_info");
-            var name = trackInfo.get("name").getAsString();
-            var interval = trackInfo.get("interval").getAsInt();
-            boolean vip = false;
-            if (trackInfo.has("pay")) {
-                var pay = trackInfo.getAsJsonObject("pay");
-                if (pay.has("pay_play")) {
-                    vip = pay.get("pay_play").getAsInt() == 1;
-                }
-            }
-            String mediaMid = "";
-            if (trackInfo.has("file")) {
-                var file = trackInfo.getAsJsonObject("file");
-                if (file.has("media_mid")) {
-                    mediaMid = file.get("media_mid").getAsString();
-                }
-            }
-            return new TrackInfo(name, interval, mediaMid, vip);
-        } catch (Exception e) {
-            MengSamaNetMusic.LOGGER.error("", e);
+            SongInfo song = fetchTrack(mid);
+            return new SongNameData(song.songName, song.songTime);
+        } catch (IOException error) {
+            return new SongNameData("", 0);
         }
-        return new TrackInfo("", 0, "", false);
     }
 
-    private static JsonObject requestVkeyData(String songMid, String mediaMid, Map<String, String> requestPropertyData, FileCandidate[] candidates, String uin) throws IOException {
-        JsonArray filenameList = new JsonArray();
-        JsonArray songMidList = new JsonArray();
-        JsonArray songTypeList = new JsonArray();
-        for (FileCandidate candidate : candidates) {
-            filenameList.add(candidate.buildFilename(mediaMid));
-            songMidList.add(songMid);
-            songTypeList.add(0);
+    public static SongInfo fetchTrack(String songMid) throws IOException {
+        return fetchTrack(songMid, effectiveCookie());
+    }
+
+    private static SongInfo fetchTrack(String songMid, String cookie) throws IOException {
+        SongInfo song = decodeTrack(requestTrackObject(songMid, cookie));
+        if (song == null) throw new IOException("QQ track metadata is missing");
+        return song;
+    }
+
+    private static JsonObject requestTrackObject(String songMid, String cookie) throws IOException {
+        JsonObject parameters = new JsonObject();
+        parameters.addProperty("song_mid", songMid);
+        parameters.addProperty("song_id", 0);
+        JsonObject envelope = envelope("0");
+        envelope.add("req_1", serviceCall("music.pf_song_detail_svr", "get_song_detail", parameters));
+        JsonObject root = JsonParser.parseString(sendJson(DETAIL_MUSICU, envelope, browserHeaders(cookie))).getAsJsonObject();
+        JsonObject response = object(root, "req_1");
+        JsonObject data = object(response, "data");
+        JsonObject track = object(data, "track_info");
+        if (track == null) throw new IOException("QQ track detail response has no track_info");
+        return track;
+    }
+
+    static SongInfo decodeTrack(JsonObject track) {
+        if (track == null) return null;
+        String mid = text(track, "mid");
+        String title = text(track, "name");
+        SongInfo song = new SongInfo(mid, title, number(track, "interval", 0));
+        song.providerId = mid;
+        song.source = "qq";
+        JsonObject album = object(track, "album");
+        song.albumMid = text(album, "mid");
+        song.albumName = text(album, "name");
+        song.coverUrl = buildAlbumCoverUrl(song.albumMid, text(album, "pmId"));
+        song.picUrl = song.coverUrl;
+        JsonObject pay = object(track, "pay");
+        song.vip = number(pay, "pay_play", 0) == 1;
+        JsonArray singers = array(track, "singer");
+        if (singers != null) {
+            for (JsonElement singer : singers) {
+                if (singer.isJsonObject()) {
+                    String name = text(singer.getAsJsonObject(), "name");
+                    if (!name.isBlank()) song.artists.add(name);
+                }
+            }
         }
+        return song;
+    }
 
-        JsonObject param = new JsonObject();
-        param.add("filename", filenameList);
-        param.addProperty("guid", "10000");
-        param.add("songmid", songMidList);
-        param.add("songtype", songTypeList);
-        param.addProperty("uin", uin);
-        param.addProperty("loginflag", 1);
-        param.addProperty("platform", "20");
+    static String catalogRequest(String module, String method, JsonObject parameters) throws IOException {
+        JsonObject body = envelope("2121");
+        body.add("music", serviceCall(module, method, parameters));
+        return sendJson(MUSICU, body, browserHeaders(effectiveCookie()));
+    }
 
-        JsonObject req = new JsonObject();
-        req.addProperty("module", "vkey.GetVkeyServer");
-        req.addProperty("method", "CgiGetVkey");
-        req.add("param", param);
+    public static String getLyric(String songMid) throws IOException {
+        if (songMid == null || songMid.isBlank()) return "";
+        Map<String, String> headers = browserHeaders(effectiveCookie());
+        String endpoint = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid="
+                + URLEncoder.encode(songMid, StandardCharsets.UTF_8) + "&format=json&nobase64=1&g_tk=5381";
+        return text(JsonParser.parseString(NetWorker.get(endpoint, headers)).getAsJsonObject(), "lyric");
+    }
 
-        JsonObject comm = new JsonObject();
-        comm.addProperty("uin", uin);
-        comm.addProperty("format", "json");
-        comm.addProperty("ct", 24);
-        comm.addProperty("cv", 0);
+    public static List<String> buildAlbumCoverUrls(String albumMid) {
+        String mid = albumMid == null ? "" : albumMid.trim();
+        if (mid.isEmpty()) return List.of();
+        String prefix = "https://y.gtimg.cn/music/photo_new/T002R";
+        return List.of(prefix + "300x300M000" + mid + ".jpg", prefix + "500x500M000" + mid + ".jpg",
+                prefix + "150x150M000" + mid + ".jpg", "https://y.qq.com/music/photo_new/T002R300x300M000" + mid + ".jpg");
+    }
 
-        JsonObject body = new JsonObject();
-        body.add("req_1", req);
+    public static String buildAlbumCoverUrl(String albumMid, String ignoredPmId) {
+        List<String> urls = buildAlbumCoverUrls(albumMid);
+        return urls.isEmpty() ? "" : urls.get(0);
+    }
+
+    public static Map<String, String> playbackHeaders(String cookie) {
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36");
+        headers.put("Referer", "https://y.qq.com/");
+        if (cookie != null && !cookie.isBlank()) headers.put("Cookie", cookie);
+        return headers;
+    }
+
+    private static JsonObject requestPlayback(String songMid, String mediaMid, String uin, MediaFormat format,
+                                               Map<String, String> headers) throws IOException {
+        JsonObject parameters = new JsonObject();
+        parameters.add("filename", strings(format.fileName(mediaMid)));
+        parameters.addProperty("guid", "10000");
+        parameters.add("songmid", strings(songMid));
+        parameters.add("songtype", integers(0));
+        parameters.addProperty("uin", uin);
+        parameters.addProperty("loginflag", 1);
+        parameters.addProperty("platform", "20");
+        JsonObject body = envelope("0");
         body.addProperty("loginUin", uin);
-        body.add("comm", comm);
-
-        var response = postJson("https://u.y.qq.com/cgi-bin/musicu.fcg", body.toString(), requestPropertyData);
-        var tree = JsonParser.parseString(response).getAsJsonObject();
-        if (getIntOrDefault(tree, "code", -1) != 0) {
-            throw new RuntimeException("Vkey request failed");
-        }
-        return tree.getAsJsonObject("req_1").getAsJsonObject("data");
+        body.add("req_1", serviceCall("vkey.GetVkeyServer", "CgiGetVkey", parameters));
+        JsonObject root = JsonParser.parseString(sendJson(DETAIL_MUSICU, body, headers)).getAsJsonObject();
+        JsonObject response = object(root, "req_1");
+        JsonObject data = object(response, "data");
+        if (number(root, "code", -1) != 0 || data == null) throw new IOException("QQ vkey request failed");
+        return data;
     }
 
-    private static String resolveBaseUrl(JsonObject data) {
-        if (data != null && data.has("sip")) {
-            JsonArray sip = data.getAsJsonArray("sip");
-            if (sip != null && !sip.isEmpty()) {
-                String value = sip.get(0).getAsString();
-                if (value != null && !value.isBlank()) {
-                    return value.endsWith("/") ? value : value + "/";
-                }
-            }
-        }
-        return DEFAULT_SIP;
+    private static JsonObject serviceCall(String module, String method, JsonObject parameters) {
+        JsonObject call = new JsonObject();
+        call.addProperty("module", module);
+        call.addProperty("method", method);
+        call.add("param", parameters);
+        return call;
     }
 
-    private static String selectBestPurl(JsonArray midurlinfo) {
-        if (midurlinfo == null) {
-            return "";
+    private static JsonObject envelope(String clientVersion) {
+        JsonObject common = new JsonObject();
+        common.addProperty("uin", "0");
+        common.addProperty("format", "json");
+        common.addProperty("ct", 19);
+        common.addProperty("cv", clientVersion);
+        JsonObject body = new JsonObject();
+        body.add("comm", common);
+        return body;
+    }
+
+    private static String sendJson(String endpoint, JsonObject body, Map<String, String> headers) throws IOException {
+        URLConnection connection = new URL(endpoint).openConnection(NetWorker.getProxyFromConfig());
+        connection.setConnectTimeout(12_000);
+        connection.setReadTimeout(15_000);
+        connection.setDoInput(true);
+        connection.setDoOutput(true);
+        headers.forEach(connection::setRequestProperty);
+        connection.setRequestProperty("Content-Type", "application/json;charset=utf-8");
+        try (OutputStream output = connection.getOutputStream()) {
+            output.write(body.toString().getBytes(StandardCharsets.UTF_8));
         }
-        for (int i = 0; i < midurlinfo.size(); i++) {
-            var info = midurlinfo.get(i).getAsJsonObject();
-            if (info != null && info.has("purl")) {
-                String purl = info.get("purl").getAsString();
-                if (purl != null && !purl.isBlank()) {
-                    return purl;
-                }
-            }
+        try (InputStream raw = connection.getInputStream(); InputStream decoded = decodeStream(raw, connection.getContentEncoding());
+             BufferedReader reader = new BufferedReader(new InputStreamReader(decoded, StandardCharsets.UTF_8))) {
+            StringBuilder response = new StringBuilder();
+            for (String line; (line = reader.readLine()) != null;) response.append(line);
+            return response.toString();
+        }
+    }
+
+    private static InputStream decodeStream(InputStream input, String encoding) throws IOException {
+        String value = encoding == null ? "" : encoding.toLowerCase(Locale.ROOT);
+        if (value.contains("gzip")) return new GZIPInputStream(input);
+        if (value.contains("deflate")) return new InflaterInputStream(input);
+        return input;
+    }
+
+    private static Map<String, String> browserHeaders(String cookie) {
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36");
+        headers.put("Accept", "application/json, text/plain, */*");
+        headers.put("Accept-Encoding", "gzip, deflate");
+        headers.put("Referer", "https://y.qq.com/");
+        headers.put("Origin", "https://y.qq.com");
+        if (cookie != null && !cookie.isBlank()) headers.put("Cookie", cookie);
+        return headers;
+    }
+
+    private static String effectiveCookie() { return VipCookieState.getEffectiveVipCookie(); }
+
+    private static String cookieValue(String cookie, String... keys) {
+        if (cookie == null) return "";
+        for (String pair : cookie.split(";")) {
+            String[] parts = pair.trim().split("=", 2);
+            if (parts.length != 2) continue;
+            for (String key : keys) if (parts[0].equalsIgnoreCase(key)) return parts[1].replaceFirst("^o0*", "");
         }
         return "";
     }
 
-    private static String postJson(String url, String body, Map<String, String> requestPropertyData) throws IOException {
-        StringBuilder result = new StringBuilder();
-        URLConnection connection = new URL(url).openConnection(NetWorker.getProxyFromConfig());
-
-        for (Map.Entry<String, String> entry : requestPropertyData.entrySet()) {
-            connection.setRequestProperty(entry.getKey(), entry.getValue());
+    private static String firstPlayablePath(JsonArray candidates) {
+        if (candidates == null) return "";
+        for (JsonElement candidate : candidates) {
+            if (!candidate.isJsonObject()) continue;
+            String path = text(candidate.getAsJsonObject(), "purl");
+            if (!path.isBlank()) return path;
         }
-        if (!requestPropertyData.containsKey("Content-Type")) {
-            connection.setRequestProperty("Content-Type", "application/json;charset=utf-8");
-        }
-        connection.setConnectTimeout(12000);
-        connection.setDoOutput(true);
-        connection.setDoInput(true);
-
-        byte[] payload = body.getBytes(StandardCharsets.UTF_8);
-        try (OutputStream outputStream = connection.getOutputStream()) {
-            outputStream.write(payload);
-        }
-
-        try (BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = bufferedReader.readLine()) != null) {
-                result.append(line);
-            }
-        }
-
-        return result.toString();
+        return "";
     }
 
-    private static int getIntOrDefault(JsonObject object, String key, int defaultValue) {
-        if (object == null || !object.has(key)) {
-            return defaultValue;
-        }
-        try {
-            return object.get(key).getAsInt();
-        } catch (RuntimeException e) {
-            return defaultValue;
-        }
+    private static String firstString(JsonArray values, String fallback) {
+        return values != null && !values.isEmpty() && values.get(0).isJsonPrimitive() ? values.get(0).getAsString() : fallback;
     }
 
-    private static final class FileCandidate {
-        private final String prefix;
-        private final String extension;
-
-        private FileCandidate(String prefix, String extension) {
-            this.prefix = prefix;
-            this.extension = extension;
-        }
-
-        private String buildFilename(String mediaMid) {
-            return prefix + mediaMid + "." + extension;
-        }
+    private static String joinUrl(String base, String path) {
+        return (base.endsWith("/") ? base : base + "/") + (path.startsWith("/") ? path.substring(1) : path);
     }
 
-    private static final class TrackInfo {
-        private final String songName;
-        private final int interval;
-        private final String mediaMid;
-        private final boolean vip;
+    private static JsonObject object(JsonObject parent, String key) {
+        return parent != null && parent.has(key) && parent.get(key).isJsonObject() ? parent.getAsJsonObject(key) : null;
+    }
 
-        private TrackInfo(String songName, int interval, String mediaMid, boolean vip) {
-            this.songName = songName;
-            this.interval = interval;
-            this.mediaMid = mediaMid;
-            this.vip = vip;
-        }
+    private static JsonArray array(JsonObject parent, String key) {
+        return parent != null && parent.has(key) && parent.get(key).isJsonArray() ? parent.getAsJsonArray(key) : null;
+    }
+
+    private static String text(JsonObject parent, String key) {
+        try { return parent != null && parent.has(key) && !parent.get(key).isJsonNull() ? parent.get(key).getAsString() : ""; }
+        catch (RuntimeException ignored) { return ""; }
+    }
+
+    private static int number(JsonObject parent, String key, int fallback) {
+        try { return parent != null && parent.has(key) ? parent.get(key).getAsInt() : fallback; }
+        catch (RuntimeException ignored) { return fallback; }
+    }
+
+    private static JsonArray strings(String value) { JsonArray array = new JsonArray(); array.add(value); return array; }
+    private static JsonArray integers(int value) { JsonArray array = new JsonArray(); array.add(value); return array; }
+
+    private record MediaFormat(String prefix, String extension) {
+        String fileName(String mediaMid) { return prefix + mediaMid + "." + extension; }
     }
 }

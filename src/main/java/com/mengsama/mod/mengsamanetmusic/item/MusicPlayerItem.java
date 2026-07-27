@@ -7,11 +7,12 @@ import com.mengsama.mod.mengsamanetmusic.block.MusicPlayerBlock;
 import com.mengsama.mod.mengsamanetmusic.gui.MusicPlayerMenu;
 import com.mengsama.mod.mengsamanetmusic.network.ModNetwork;
 import com.mengsama.mod.mengsamanetmusic.network.PlayerPlayMusicPacket;
+import com.mengsama.mod.mengsamanetmusic.util.AsyncIoExecutor;
+import com.mengsama.mod.mengsamanetmusic.util.NetWorker;
 import com.mengsama.mod.mengsamanetmusic.util.PlayMode;
 import net.minecraft.core.NonNullList;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
-import net.minecraft.network.chat.TextColor;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.ContainerHelper;
@@ -24,7 +25,6 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
-import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
@@ -37,11 +37,8 @@ import net.minecraftforge.network.PacketDistributor;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URL;
 import java.util.List;
-import java.util.Random;
 import java.util.concurrent.CompletableFuture;
 
 public class MusicPlayerItem extends BlockItem {
@@ -49,7 +46,12 @@ public class MusicPlayerItem extends BlockItem {
     private static final String PLAY_INDEX_KEY = "PlayIndex";
     private static final String PLAY_MODE_KEY = "PlayMode";
     private static final String IS_PLAY_KEY = "IsPlay";
+    private static final String IS_PAUSED_KEY = "IsPaused";
+    private static final String BROADCAST_KEY = "Broadcast";
     private static final String CURRENT_TIME_KEY = "CurrentTime";
+    private static final String AUTO_ADVANCE_ARMED_KEY = "AutoAdvanceArmed";
+    private static final String INSTANCE_ID_KEY = "MusicPlayerInstanceId";
+    private static final java.util.concurrent.ConcurrentHashMap<java.util.UUID, java.util.concurrent.atomic.AtomicLong> PLAY_REQUEST_GENERATIONS = new java.util.concurrent.ConcurrentHashMap<>();
 
     public MusicPlayerItem(Block block, Properties properties) {
         super(block, properties);
@@ -74,6 +76,7 @@ public class MusicPlayerItem extends BlockItem {
         }
 
         if (!level.isClientSide && player instanceof ServerPlayer serverPlayer) {
+            java.util.UUID instanceId = getOrCreateInstanceId(stack);
             NetworkHooks.openScreen(serverPlayer, new MenuProvider() {
                 @Override
                 public @NotNull Component getDisplayName() {
@@ -82,8 +85,11 @@ public class MusicPlayerItem extends BlockItem {
 
                 @Override
                 public AbstractContainerMenu createMenu(int windowId, Inventory playerInv, Player p) {
-                    return new MusicPlayerMenu(windowId, playerInv);
+                    return MusicPlayerMenu.forPlayerHand(windowId, playerInv, instanceId);
                 }
+            }, buf -> {
+                buf.writeByte(MusicPlayerMenu.Context.PLAYER_HAND.ordinal());
+                buf.writeUUID(instanceId);
             });
         }
         return InteractionResultHolder.sidedSuccess(stack, level.isClientSide);
@@ -92,61 +98,290 @@ public class MusicPlayerItem extends BlockItem {
     @Override
     public void inventoryTick(ItemStack stack, Level level, Entity entity, int slot, boolean isSelected) {
         if (level.isClientSide) return;
-        if (!isPlay(stack)) return;
+        if (!isPlay(stack) || isPaused(stack)) return;
         tickTime(stack);
         int currentTime = getCurrentTime(stack);
-        if (0 < currentTime && currentTime < 16 && currentTime % 5 == 0) {
-            int prevPlayIndex = getPlayIndex(stack);
+        if (currentTime == 0 && stack.getOrCreateTag().getBoolean(AUTO_ADVANCE_ARMED_KEY)) {
+            stack.getOrCreateTag().putBoolean(AUTO_ADVANCE_ARMED_KEY, false);
             advanceToNext(stack);
             ItemStack cd = getCurrentCd(stack);
             if (cd.isEmpty()) {
                 setPlay(stack, false);
                 return;
             }
-            SongInfo songInfo;
-            if (cd.getItem() instanceof MusicListItem) {
-                if (getPlayIndex(stack) == prevPlayIndex) {
-                    MusicListItem.nextMusic(cd);
-                }
-                songInfo = MusicListItem.getSongInfo(cd);
-            } else {
-                songInfo = MusicCDItem.getSongInfo(cd);
-            }
-            if (songInfo != null && entity instanceof ServerPlayer sp) {
-                setPlayToClient(stack, songInfo, sp);
+            SongInfo songInfo = MusicListItem.getSongInfo(cd);
+            if (songInfo != null) {
+                if (entity instanceof ServerPlayer sp) setPlayToClient(stack, songInfo, sp);
+                else if (entity instanceof net.minecraft.world.entity.LivingEntity living)
+                    setPlayToEntity(stack, songInfo, living);
             }
         }
     }
 
+    public static long currentRequestGeneration(Entity entity) {
+        java.util.concurrent.atomic.AtomicLong value = entity == null ? null : PLAY_REQUEST_GENERATIONS.get(entity.getUUID());
+        return value == null ? 0L : value.get();
+    }
+
     public static void setPlayToClient(ItemStack stack, SongInfo info, ServerPlayer player) {
+        setPlayToClient(stack, info, player, 0L, 0);
+    }
+
+    public static void setPlayToClient(ItemStack stack, SongInfo info, ServerPlayer player, long refreshNonce) {
+        setPlayToClient(stack, info, player, refreshNonce, 0);
+    }
+
+    public static void setPlayToClient(ItemStack stack, SongInfo info, ServerPlayer player, long refreshNonce, int startSecond) {
+        setPlayToClient(stack, info, player, refreshNonce, startSecond, false);
+    }
+
+    public static void seekToClient(ItemStack stack, SongInfo info, ServerPlayer player, int startSecond, boolean paused) {
+        setPlayToClient(stack, info, player, 0L, startSecond, paused);
+    }
+
+    private static void setPlayToClient(ItemStack stack, SongInfo info, ServerPlayer player, long refreshNonce,
+                                        int startSecond, boolean preservePause) {
         ServerLevel serverLevel = player.serverLevel();
         SongInfo clone = info.clone();
+        int inventorySlot = findInventorySlot(player, stack);
+        java.util.UUID instanceId = getOrCreateInstanceId(stack);
+        String targetId = "item:" + player.getUUID() + ":" + inventorySlot + ":" + instanceId;
+        long requestGeneration = PLAY_REQUEST_GENERATIONS
+                .computeIfAbsent(player.getUUID(), ignored -> new java.util.concurrent.atomic.AtomicLong())
+                .incrementAndGet();
         setPlay(stack, true);
+        setPaused(stack, preservePause);
+        MengSamaNetMusic.LOGGER.info("[播放阶段] 请求已收 target={} generation={} source={}", targetId, requestGeneration, clone.source);
         resolveUrlAsync(clone).thenAcceptAsync(resolved -> {
             try {
-                if (!isPlay(stack)) return;
-                setCurrentTime(stack, resolved.songTime * 20 + 64);
-                String url = resolved.songUrl;
+                if (!isPlay(stack) || PLAY_REQUEST_GENERATIONS.get(player.getUUID()).get() != requestGeneration) return;
+                if (!hasPlayableUrl(resolved)) {
+                    failPlayback(stack, player, refreshNonce != 0L ? "临时音源已失效" : "URL解析失败：未获得可播放地址");
+                    return;
+                }
+                MengSamaNetMusic.LOGGER.info("[播放阶段] URL结果 target={} generation={} result=success host={}",
+                        targetId, requestGeneration, safeUrlHost(resolved.songUrl));
+                updateCurrentSongMetadata(stack, resolved, clone);
+                int clampedStart = Math.max(0, Math.min(resolved.songTime, startSecond));
+                setCurrentTime(stack, Math.max(1, (resolved.songTime - clampedStart) * 20 + 64));
+                com.mengsama.mod.mengsamanetmusic.network.PlaybackRefreshSessions.publish(
+                        targetId, requestGeneration, stableSongInfo(resolved, clone), player.getUUID().toString());
+                boolean broadcast = isBroadcast(stack);
                 PlayerPlayMusicPacket msg = new PlayerPlayMusicPacket(
-                        player.getId(), url, resolved.songTime, resolved.songName,
-                        getPlayIndex(stack), resolved);
-                ModNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), msg);
+                        player.getId(), targetId, resolved.songUrl, resolved.songTime, resolved.songName,
+                        getPlayIndex(stack), requestGeneration, refreshNonce, resolved, false, broadcast, clampedStart);
+                if (broadcast) {
+                    ModNetwork.sendToNearby(serverLevel, player.blockPosition(), msg);
+                    MengSamaNetMusic.LOGGER.info("[播放阶段] 广播 target={} generation={} recipients=nearby", targetId, requestGeneration);
+                } else {
+                    ModNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), msg);
+                    MengSamaNetMusic.LOGGER.info("[播放阶段] 广播 target={} generation={} recipients=owner", targetId, requestGeneration);
+                }
+                if (preservePause) {
+                    var pause = new com.mengsama.mod.mengsamanetmusic.network.PauseMusicPacketClient(
+                            targetId, true, requestGeneration);
+                    if (broadcast) ModNetwork.sendToNearby(serverLevel, player.blockPosition(), pause);
+                    else ModNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), pause);
+                }
             } catch (Exception e) {
-                MengSamaNetMusic.LOGGER.error("setPlayToClient error: {}", e.getMessage());
+                failPlayback(stack, player, "播放请求处理异常");
+                MengSamaNetMusic.LOGGER.error("[播放阶段] 广播异常 target={} generation={}", targetId, requestGeneration, e);
             }
         }, serverLevel.getServer());
     }
 
-    private static CompletableFuture<SongInfo> resolveUrlAsync(SongInfo info) {
+    public static void setPlayToEntity(ItemStack stack, SongInfo info, net.minecraft.world.entity.LivingEntity entity) {
+        setPlayToEntity(stack, info, entity, 0L, 0);
+    }
+
+    public static void setPlayToEntity(ItemStack stack, SongInfo info, net.minecraft.world.entity.LivingEntity entity, long refreshNonce) {
+        setPlayToEntity(stack, info, entity, refreshNonce, 0);
+    }
+
+    public static void setPlayToEntity(ItemStack stack, SongInfo info, net.minecraft.world.entity.LivingEntity entity, long refreshNonce, int startSecond) {
+        setPlayToEntity(stack, info, entity, refreshNonce, startSecond, false);
+    }
+
+    public static void seekToEntity(ItemStack stack, SongInfo info, net.minecraft.world.entity.LivingEntity entity,
+                                    int startSecond, boolean paused) {
+        setPlayToEntity(stack, info, entity, 0L, startSecond, paused);
+    }
+
+    private static void setPlayToEntity(ItemStack stack, SongInfo info, net.minecraft.world.entity.LivingEntity entity,
+                                        long refreshNonce, int startSecond, boolean preservePause) {
+        if (!(entity.level() instanceof ServerLevel serverLevel)) return;
+        SongInfo clone = info.clone();
+        java.util.UUID instanceId = getOrCreateInstanceId(stack);
+        String targetId = com.mengsama.mod.mengsamanetmusic.compat.EntityMusicDevice.targetId(entity, stack);
+        long requestGeneration = PLAY_REQUEST_GENERATIONS
+                .computeIfAbsent(entity.getUUID(), ignored -> new java.util.concurrent.atomic.AtomicLong())
+                .incrementAndGet();
+        // The tracker validates IsPlay every server tick. Publish the authoritative playing bit
+        // before activation so same-tick validation can never invalidate a fresh request.
+        setPlay(stack, true);
+        setPaused(stack, preservePause);
+        MengSamaNetMusic.LOGGER.info("[播放阶段] 请求已收 target={} generation={} source={}", targetId, requestGeneration, clone.source);
+        if (entity instanceof com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid maid) {
+            com.mengsama.mod.mengsamanetmusic.compat.ActiveMaidMusicTracker.activate(maid, stack, targetId);
+        }
+        resolveUrlAsync(clone).thenAcceptAsync(resolved -> {
+            ItemStack current = com.mengsama.mod.mengsamanetmusic.compat.EntityMusicDevice.heldPlayer(entity);
+            java.util.UUID currentInstance = current.isEmpty() ? null : getInstanceId(current);
+            if (entity.isRemoved() || !instanceId.equals(currentInstance)
+                    || !isPlay(current) || PLAY_REQUEST_GENERATIONS.get(entity.getUUID()).get() != requestGeneration) return;
+            if (!hasPlayableUrl(resolved)) {
+                failPlayback(current, entity, refreshNonce != 0L ? "临时音源已失效" : "URL解析失败：未获得可播放地址");
+                return;
+            }
+            MengSamaNetMusic.LOGGER.info("[播放阶段] URL结果 target={} generation={} result=success host={}",
+                    targetId, requestGeneration, safeUrlHost(resolved.songUrl));
+            updateCurrentSongMetadata(current, resolved, clone);
+            int clampedStart = Math.max(0, Math.min(resolved.songTime, startSecond));
+            setCurrentTime(current, Math.max(1, (resolved.songTime - clampedStart) * 20 + 64));
+            boolean maidSource = entity instanceof com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
+            String refreshOwner = entity instanceof ServerPlayer ? entity.getUUID().toString()
+                    : entity instanceof com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid maid && maid.getOwner() != null
+                    ? maid.getOwner().getUUID().toString() : "";
+            com.mengsama.mod.mengsamanetmusic.network.PlaybackRefreshSessions.publish(
+                    targetId, requestGeneration, stableSongInfo(resolved, clone), refreshOwner);
+            PlayerPlayMusicPacket msg = new PlayerPlayMusicPacket(entity.getId(), targetId, resolved.songUrl,
+                    resolved.songTime, resolved.songName, -1, requestGeneration, refreshNonce, resolved, maidSource, false, clampedStart);
+            if (entity instanceof com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid maid) {
+                com.mengsama.mod.mengsamanetmusic.compat.MaidLyricSynchronizer.start(maid, targetId, resolved);
+            }
+            ModNetwork.sendToNearby(serverLevel, entity.blockPosition(), msg);
+            if (preservePause) ModNetwork.sendToNearby(serverLevel, entity.blockPosition(),
+                    new com.mengsama.mod.mengsamanetmusic.network.PauseMusicPacketClient(
+                            targetId, true, requestGeneration));
+            MengSamaNetMusic.LOGGER.info("[播放阶段] 广播 target={} generation={} radius=96", targetId, requestGeneration);
+        }, serverLevel.getServer()).exceptionally(error -> {
+            serverLevel.getServer().execute(() -> failPlayback(stack, entity, "播放请求处理异常"));
+            MengSamaNetMusic.LOGGER.error("[播放阶段] URL解析异常 target={} generation={}", targetId, requestGeneration, error);
+            return null;
+        });
+    }
+
+    /** Persist only stable identity and metadata; signed/provider playback URLs stay runtime-only. */
+    public static SongInfo stableSongInfo(SongInfo resolved, SongInfo stableSource) {
+        SongInfo stable = (stableSource == null ? resolved : stableSource).clone();
+        if (resolved != null) {
+            if (resolved.songName != null && !resolved.songName.isBlank()) stable.songName = resolved.songName;
+            if (resolved.songTime > 0) stable.songTime = resolved.songTime;
+            if (resolved.artists != null && !resolved.artists.isEmpty()) stable.artists = new java.util.ArrayList<>(resolved.artists);
+            if (resolved.picUrl != null && !resolved.picUrl.isBlank()) stable.picUrl = resolved.picUrl;
+            if (resolved.coverUrl != null && !resolved.coverUrl.isBlank()) stable.coverUrl = resolved.coverUrl;
+            if (resolved.albumMid != null && !resolved.albumMid.isBlank()) stable.albumMid = resolved.albumMid;
+            if (resolved.albumName != null && !resolved.albumName.isBlank()) stable.albumName = resolved.albumName;
+            if ((stable.source == null || stable.source.isBlank() || "unknown".equals(stable.source)) && resolved.source != null) stable.source = resolved.source;
+            if ((stable.providerId == null || stable.providerId.isBlank()) && resolved.providerId != null) stable.providerId = resolved.providerId;
+            if (stable.songId <= 0) stable.songId = resolved.songId;
+        }
+        stable.normalizeIdentity();
+        String original = stableSource == null ? stable.rawUrl : stableSource.rawUrl;
+        if (original == null || original.isBlank()) original = stableSource == null ? stable.songUrl : stableSource.songUrl;
+        stable.rawUrl = original == null ? "" : original;
+        stable.songUrl = stable.rawUrl;
+        stable.playbackHeaders.clear();
+        return stable;
+    }
+
+    private static void updateCurrentSongMetadata(ItemStack player, SongInfo resolved, SongInfo stableSource) {
+        if (player == null || player.isEmpty() || resolved == null) return;
+        SongInfo stable = stableSongInfo(resolved, stableSource);
+        int slot = getPlayIndex(player);
+        NonNullList<ItemStack> cds = loadAllCds(player);
+        if (slot < 0 || slot >= cds.size()) return;
+        ItemStack cd = cds.get(slot);
+        if (cd.isEmpty()) return;
+        if (cd.getItem() instanceof MusicListItem) MusicListItem.setSongInfo(stable, cd);
+        saveCdToItem(player, slot, cd);
+    }
+
+    static boolean hasPlayableUrl(SongInfo info) {
+        if (info == null || info.songUrl == null || info.songUrl.isBlank()) return false;
+        try {
+            String protocol = new URI(info.songUrl).getScheme();
+            return "http".equalsIgnoreCase(protocol) || "https".equalsIgnoreCase(protocol);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static String safeUrlHost(String url) {
+        try { return new URI(url).getHost(); } catch (Exception ignored) { return "invalid"; }
+    }
+
+    private static void failPlayback(ItemStack stack, Entity entity, String reason) {
+        if (!stack.isEmpty()) setCurrentTime(stack, 1); // one tick later auto-advance; failure must not wedge the playlist
+        if (entity instanceof com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid maid)
+            com.mengsama.mod.mengsamanetmusic.compat.MaidLyricSynchronizer.stop(maid.getUUID());
+        MengSamaNetMusic.LOGGER.warn("[播放阶段] 失败 entity={} reason={}", entity.getUUID(), reason);
+        if (entity instanceof ServerPlayer player) {
+            player.sendSystemMessage(Component.literal("音乐播放失败：" + reason));
+        } else if (entity instanceof com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid maid
+                && maid.getOwner() instanceof ServerPlayer owner) {
+            owner.sendSystemMessage(Component.literal("女仆音乐播放失败：" + reason));
+        }
+    }
+
+    public static CompletableFuture<SongInfo> resolveUrlAsync(SongInfo stableInfo) {
+        // Always resolve a detached runtime copy. Callers may pass an object backed by CD/list NBT.
+        final SongInfo info = stableInfo == null ? new SongInfo() : stableInfo.clone();
+        info.normalizeIdentity();
         return CompletableFuture.supplyAsync(() -> {
+            if ("qq".equals(info.source) && info.providerId != null && !info.providerId.isBlank()) {
+                try {
+                    // Resolution runs on the logical server. Use its effective credential (saved login first,
+                    // configured cookie second); nearby clients only receive the short-lived signed media URL.
+                    String cookie = com.mengsama.mod.mengsamanetmusic.api.VipCookieState.getServerEffectiveVipCookie();
+                    SongInfo refreshed = com.mengsama.mod.mengsamanetmusic.api.QqMusicUtils.resolveSong(info.providerId, cookie, 0);
+                    if (refreshed != null && refreshed.songUrl != null && !refreshed.songUrl.isBlank()) {
+                        if (refreshed.songName == null || refreshed.songName.isBlank()) refreshed.songName = info.songName;
+                        if (refreshed.artists == null || refreshed.artists.isEmpty()) refreshed.artists = info.artists;
+                        if (refreshed.songTime <= 0) refreshed.songTime = info.songTime;
+                        if (refreshed.albumMid == null || refreshed.albumMid.isBlank()) refreshed.albumMid = info.albumMid;
+                        if (refreshed.coverUrl == null || refreshed.coverUrl.isBlank()) refreshed.coverUrl = info.coverUrl;
+                        if (refreshed.picUrl == null || refreshed.picUrl.isBlank()) refreshed.picUrl = info.picUrl;
+                        if ((refreshed.coverUrl == null || refreshed.coverUrl.isBlank()) && refreshed.albumMid != null) {
+                            refreshed.coverUrl = com.mengsama.mod.mengsamanetmusic.api.QqMusicUtils.buildAlbumCoverUrl(refreshed.albumMid, "");
+                        }
+                        if (refreshed.picUrl == null || refreshed.picUrl.isBlank()) refreshed.picUrl = refreshed.coverUrl;
+                        refreshed.playbackHeaders.putAll(com.mengsama.mod.mengsamanetmusic.api.QqMusicUtils.playbackHeaders(cookie));
+                        return refreshed;
+                    }
+                } catch (Exception e) {
+                    MengSamaNetMusic.LOGGER.warn("Failed to refresh QQ URL for {}: {}", info.providerId, e.getMessage());
+                }
+            }
+            if ("apple".equals(info.source)) {
+                // iTunes Search API previewUrl is the only default Apple playback URL. Never
+                // reinterpret a MusicKit token/catalog URL as a DRM-free media stream.
+                return com.mengsama.mod.mengsamanetmusic.api.AppleMusicApi.isSafePreviewUrl(info.songUrl)
+                        ? info : new SongInfo("", info.songName, 0);
+            }
+            if ("netease".equals(info.source) && info.songId > 0) {
+                try {
+                    SongInfo refreshed = MengSamaNetMusic.NET_EASE_API.get163Song(info.songId);
+                    if (refreshed != null && refreshed.songUrl != null && !refreshed.songUrl.isBlank()
+                            && !refreshed.songUrl.equals(info.songUrl)) {
+                        if (refreshed.songName == null || refreshed.songName.isBlank()) refreshed.songName = info.songName;
+                        if (refreshed.artists == null || refreshed.artists.isEmpty()) refreshed.artists = info.artists;
+                        if (refreshed.songTime <= 0) refreshed.songTime = info.songTime;
+                        refreshed.playbackHeaders.putAll(com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic.NET_EASE_API.getRequestPropertyData());
+                        return refreshed;
+                    }
+                } catch (Exception e) {
+                    MengSamaNetMusic.LOGGER.warn("Failed to refresh NetEase URL for {}: {}", info.songId, e.getMessage());
+                }
+                String fallback = info.rawUrl == null || info.rawUrl.isBlank()
+                        ? "https://music.163.com/song/media/outer/url?id=" + info.songId + ".mp3" : info.rawUrl;
+                String metingUrl = com.mengsama.mod.mengsamanetmusic.api.MetingApi.getSongUrl(info.songId);
+                info.songUrl = metingUrl != null && !metingUrl.isBlank() ? metingUrl : fallback;
+                info.playbackHeaders.putAll(MengSamaNetMusic.NET_EASE_API.getRequestPropertyData());
+                return info;
+            }
             String url = info.songUrl;
-            if (url == null || url.isBlank()) {
-                return info;
-            }
-            if (com.mengsama.mod.mengsamanetmusic.api.MetingApi.isMetingUrl(url)) {
-                MengSamaNetMusic.LOGGER.info("Using Meting API URL directly: {}", url);
-                return info;
-            }
+            if (url == null || url.isBlank()) return info;
             if (!url.startsWith("http://") && !url.startsWith("https://")) {
                 return info;
             }
@@ -179,7 +414,7 @@ public class MusicPlayerItem extends BlockItem {
                 MengSamaNetMusic.LOGGER.warn("Failed to resolve URL for song: {}", url, e);
             }
             return info;
-        });
+        }, AsyncIoExecutor.executor());
     }
 
     private static long extractSongId(String url) {
@@ -197,52 +432,40 @@ public class MusicPlayerItem extends BlockItem {
     }
 
     private static String resolveRedirectUrl(String urlString) {
-        java.util.Map<String, String> netEaseHeaders = MengSamaNetMusic.NET_EASE_API.getRequestPropertyData();
-        String currentUrl = urlString;
-        for (int i = 0; i < 5; i++) {
-            try {
-                URL url = new URI(currentUrl).toURL();
-                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-                connection.setInstanceFollowRedirects(false);
-                connection.setConnectTimeout(5000);
-                connection.setReadTimeout(5000);
-                netEaseHeaders.forEach(connection::setRequestProperty);
-                int responseCode = connection.getResponseCode();
-                if (responseCode == HttpURLConnection.HTTP_MOVED_TEMP ||
-                        responseCode == HttpURLConnection.HTTP_MOVED_PERM ||
-                        responseCode == HttpURLConnection.HTTP_SEE_OTHER ||
-                        responseCode == 307 || responseCode == 308) {
-                    String location = connection.getHeaderField("Location");
-                    connection.disconnect();
-                    if (location != null) {
-                        if (location.startsWith("/")) {
-                            currentUrl = new URL(url.getProtocol(), url.getHost(), url.getPort(), location).toString();
-                        } else if (location.startsWith("http://") || location.startsWith("https://")) {
-                            currentUrl = location;
-                        } else {
-                            String base = url.getProtocol() + "://" + url.getHost();
-                            if (url.getPort() != -1 && url.getPort() != 80 && url.getPort() != 443) {
-                                base += ":" + url.getPort();
-                            }
-                            currentUrl = base + (location.startsWith("/") ? "" : "/") + location;
-                        }
-                        continue;
-                    }
-                }
-                connection.disconnect();
-                return currentUrl;
-            } catch (Exception e) {
-                MengSamaNetMusic.LOGGER.warn("Failed to resolve redirect for {}: {}", currentUrl, e.getMessage());
-                return currentUrl;
-            }
+        try {
+            return NetWorker.resolveRedirect(urlString, 5,
+                    MengSamaNetMusic.NET_EASE_API.getRequestPropertyData());
+        } catch (Exception e) {
+            MengSamaNetMusic.LOGGER.warn("Failed to resolve redirect for {}: {}", urlString, e.getMessage());
+            return urlString;
         }
-        return currentUrl;
     }
 
     public static void saveAllCdsToItem(ItemStack playerItem, NonNullList<ItemStack> cds) {
+        NonNullList<ItemStack> packed = packPlaylist(cds);
         CompoundTag nbt = new CompoundTag();
-        ContainerHelper.saveAllItems(nbt, cds);
+        ContainerHelper.saveAllItems(nbt, packed);
         playerItem.addTagElement("Item", nbt);
+        int first = findFirstNonEmpty(packed);
+        int last = findLastNonEmpty(packed);
+        int index = getPlayIndex(playerItem);
+        if (first < 0) {
+            setPlayIndex(playerItem, 0);
+            setPlay(playerItem, false);
+            setCurrentTime(playerItem, 0);
+        } else if (index < first || index > last || packed.get(index).isEmpty()) {
+            setPlayIndex(playerItem, Math.min(Math.max(index, first), last));
+        }
+    }
+
+    /** NBT 中只允许连续的非空项，避免 GUI 紧凑列表索引与 54 槽原始索引矛盾。 */
+    public static NonNullList<ItemStack> packPlaylist(List<ItemStack> source) {
+        NonNullList<ItemStack> packed = NonNullList.withSize(CD_SLOTS, ItemStack.EMPTY);
+        int out = 0;
+        for (ItemStack item : source) {
+            if (!item.isEmpty() && out < CD_SLOTS) packed.set(out++, item);
+        }
+        return packed;
     }
 
     public static void saveCdToItem(ItemStack playerItem, int slot, ItemStack cd) {
@@ -286,6 +509,24 @@ public class MusicPlayerItem extends BlockItem {
 
     public static void setPlay(ItemStack stack, boolean play) {
         stack.getOrCreateTag().putBoolean(IS_PLAY_KEY, play);
+        if (!play) stack.getOrCreateTag().putBoolean(IS_PAUSED_KEY, false);
+    }
+
+    public static boolean isPaused(ItemStack stack) {
+        return stack.hasTag() && stack.getTag().getBoolean(IS_PAUSED_KEY);
+    }
+
+    /** Pause is orthogonal to playing: the active server session and generation remain alive. */
+    public static void setPaused(ItemStack stack, boolean paused) {
+        stack.getOrCreateTag().putBoolean(IS_PAUSED_KEY, paused);
+    }
+
+    public static boolean isBroadcast(ItemStack stack) {
+        return stack.hasTag() && stack.getTag().getBoolean(BROADCAST_KEY);
+    }
+
+    public static void setBroadcast(ItemStack stack, boolean broadcast) {
+        stack.getOrCreateTag().putBoolean(BROADCAST_KEY, broadcast);
     }
 
     public static int getCurrentTime(ItemStack stack) {
@@ -297,13 +538,41 @@ public class MusicPlayerItem extends BlockItem {
 
     public static void setCurrentTime(ItemStack stack, int time) {
         stack.getOrCreateTag().putInt(CURRENT_TIME_KEY, time);
+        stack.getOrCreateTag().putBoolean(AUTO_ADVANCE_ARMED_KEY, time > 0);
     }
 
     public static void tickTime(ItemStack stack) {
         int ct = getCurrentTime(stack);
         if (ct > 0) {
-            setCurrentTime(stack, ct - 1);
+            // Countdown must not re-arm/disarm the one-shot natural-end transition.
+            stack.getOrCreateTag().putInt(CURRENT_TIME_KEY, ct - 1);
         }
+    }
+
+    public static int findInventorySlot(Player player, ItemStack target) {
+        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+            if (player.getInventory().getItem(i) == target) return i;
+        }
+        return -1;
+    }
+
+    /** Read-only lookup for client validation; never invent identity from a partially synced stack. */
+    @Nullable
+    public static java.util.UUID getInstanceId(ItemStack stack) {
+        CompoundTag tag = stack.getTag();
+        return tag != null && tag.hasUUID(INSTANCE_ID_KEY) ? tag.getUUID(INSTANCE_ID_KEY) : null;
+    }
+
+    public static java.util.UUID getOrCreateInstanceId(ItemStack stack) {
+        java.util.UUID existing = getInstanceId(stack);
+        if (existing != null) return existing;
+        java.util.UUID created = java.util.UUID.randomUUID();
+        stack.getOrCreateTag().putUUID(INSTANCE_ID_KEY, created);
+        return created;
+    }
+
+    public static String targetId(Player player, ItemStack stack) {
+        return "item:" + player.getUUID() + ":" + findInventorySlot(player, stack) + ":" + getOrCreateInstanceId(stack);
     }
 
     @NotNull
@@ -344,38 +613,40 @@ public class MusicPlayerItem extends BlockItem {
 
     public static void advanceToNext(ItemStack stack) {
         NonNullList<ItemStack> cds = loadAllCds(stack);
-        int playIndex = getPlayIndex(stack);
-        PlayMode mode = getPlayMode(stack);
+        int currentSlot = getPlayIndex(stack);
+        int currentSong = songIndex(cds, currentSlot);
+        PlayMode.TrackPosition next = PlayMode.nextTrack(getPlayMode(stack), currentSlot, currentSong,
+                songCounts(cds), bound -> java.util.concurrent.ThreadLocalRandom.current().nextInt(bound));
+        setPlayIndex(stack, next.slotIndex());
+        setSongIndex(cds, next);
+        saveAllCdsPreservingSlots(stack, cds);
+    }
 
-        int firstIndex = findFirstNonEmpty(cds);
-        int lastIndex = findLastNonEmpty(cds);
-        if (firstIndex < 0) return;
-
-        switch (mode) {
-            case RANDOM -> {
-                int count = 0;
-                for (ItemStack cd : cds) { if (!cd.isEmpty()) count++; }
-                if (count > 1) {
-                    int r = new Random().nextInt(count);
-                    for (int i = 0; i < CD_SLOTS; i++) {
-                        if (!cds.get(i).isEmpty()) {
-                            if (r == 0) { setPlayIndex(stack, i); return; }
-                            r--;
-                        }
-                    }
-                }
-                return;
-            }
-            case SEQUENTIAL -> {
-                int next = playIndex + 1;
-                while (next <= lastIndex) {
-                    if (!cds.get(next).isEmpty()) { setPlayIndex(stack, next); return; }
-                    next++;
-                }
-                setPlayIndex(stack, firstIndex);
-            }
-            case LOOP -> { }
+    static int[] songCounts(NonNullList<ItemStack> cds) {
+        int[] counts = new int[cds.size()];
+        for (int i = 0; i < cds.size(); i++) {
+            ItemStack cd = cds.get(i);
+            if (cd.getItem() instanceof MusicListItem) counts[i] = MusicListItem.getSongCount(cd);
+            else if (!cd.isEmpty()) counts[i] = 1;
         }
+        return counts;
+    }
+
+    private static int songIndex(NonNullList<ItemStack> cds, int slot) {
+        if (slot < 0 || slot >= cds.size()) return 0;
+        ItemStack cd = cds.get(slot);
+        return cd.getItem() instanceof MusicListItem ? MusicListItem.getSongIndex(cd) : 0;
+    }
+
+    private static void setSongIndex(NonNullList<ItemStack> cds, PlayMode.TrackPosition position) {
+        if (position.slotIndex() < 0 || position.slotIndex() >= cds.size()) return;
+        ItemStack cd = cds.get(position.slotIndex());
+        if (cd.getItem() instanceof MusicListItem) MusicListItem.setSongIndex(cd, position.songIndex());
+    }
+
+    private static void saveAllCdsPreservingSlots(ItemStack stack, NonNullList<ItemStack> cds) {
+        CompoundTag nbt = stack.getOrCreateTagElement("Item");
+        ContainerHelper.saveAllItems(nbt, cds);
     }
 
     private static int findFirstNonEmpty(NonNullList<ItemStack> cds) {
@@ -392,38 +663,4 @@ public class MusicPlayerItem extends BlockItem {
         return -1;
     }
 
-    @Override
-    public void appendHoverText(ItemStack stack, @Nullable Level level, List<Component> tooltip, TooltipFlag flag) {
-        super.appendHoverText(stack, level, tooltip, flag);
-        String text = "本模组由 MengSama0502 & niumadadi520 & YuZiJiang 合作制作\n感谢使用 感谢喜欢";
-        Component rainbow = Component.empty();
-        for (int i = 0; i < text.length(); i++) {
-            int color = rainbowColor(i, text.length());
-            rainbow = rainbow.copy().append(Component.literal(String.valueOf(text.charAt(i)))
-                    .withStyle(style -> style.withColor(TextColor.fromRgb(color))));
-        }
-        tooltip.add(rainbow);
-    }
-
-    private static int rainbowColor(int index, int total) {
-        float hue = (float) index / total;
-        float saturation = 1.0f;
-        float value = 1.0f;
-        int h = (int) (hue * 6);
-        float f = hue * 6 - h;
-        float p = value * (1 - saturation);
-        float q = value * (1 - f * saturation);
-        float t = value * (1 - (1 - f) * saturation);
-        float r, g, b;
-        switch (h % 6) {
-            case 0: r = value; g = t; b = p; break;
-            case 1: r = q; g = value; b = p; break;
-            case 2: r = p; g = value; b = t; break;
-            case 3: r = p; g = q; b = value; break;
-            case 4: r = t; g = p; b = value; break;
-            case 5: r = value; g = p; b = q; break;
-            default: r = 1; g = 1; b = 1;
-        }
-        return ((int) (r * 255) << 16) | ((int) (g * 255) << 8) | (int) (b * 255);
-    }
 }

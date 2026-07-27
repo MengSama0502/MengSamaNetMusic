@@ -2,7 +2,6 @@ package com.mengsama.mod.mengsamanetmusic.block;
 
 import com.mengsama.mod.mengsamanetmusic.api.SongInfo;
 import com.mengsama.mod.mengsamanetmusic.init.ModBlockEntities;
-import com.mengsama.mod.mengsamanetmusic.item.MusicCDItem;
 import com.mengsama.mod.mengsamanetmusic.item.MusicListItem;
 import com.mengsama.mod.mengsamanetmusic.network.ModNetwork;
 import com.mengsama.mod.mengsamanetmusic.network.StopMusicPacketClient;
@@ -11,7 +10,6 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
-import net.minecraft.network.chat.TextColor;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
@@ -103,12 +101,7 @@ public class MusicPlayerBlock extends HorizontalDirectionalBlock implements Enti
                         player.markDirty();
                         return;
                     }
-                    SongInfo songInfo;
-                    if (currentCd.getItem() instanceof MusicListItem) {
-                        songInfo = MusicListItem.getSongInfo(currentCd);
-                    } else {
-                        songInfo = MusicCDItem.getSongInfo(currentCd);
-                    }
+                    SongInfo songInfo = MusicListItem.getSongInfo(currentCd);
                     if (songInfo != null) {
                         player.setPlayToClient(songInfo);
                     }
@@ -130,10 +123,10 @@ public class MusicPlayerBlock extends HorizontalDirectionalBlock implements Enti
         }
 
         ItemStack heldItem = playerIn.getMainHandItem();
-        boolean isCD = heldItem.getItem() instanceof MusicCDItem || heldItem.getItem() instanceof MusicListItem;
+        boolean isPlaylist = heldItem.getItem() instanceof MusicListItem;
 
         if (!worldIn.isClientSide) {
-            if (isCD) {
+            if (isPlaylist) {
 
                 for (int i = 0; i < musicPlayer.getPlayerInv().getSlots(); i++) {
                     if (musicPlayer.getPlayerInv().getStackInSlot(i).isEmpty()) {
@@ -167,7 +160,7 @@ public class MusicPlayerBlock extends HorizontalDirectionalBlock implements Enti
             BlockEntity blockEntity = level.getBlockEntity(pos);
             if (blockEntity instanceof MusicPlayerBlockEntity musicPlayer) {
                 if (!level.isClientSide) {
-                    ModNetwork.sendToNearby(level, pos, new StopMusicPacketClient(-1, ""));
+                    ModNetwork.sendToNearby(level, pos, new StopMusicPacketClient("block:" + level.dimension().location() + ":" + pos.asLong()));
                 }
             }
         }
@@ -197,38 +190,4 @@ public class MusicPlayerBlock extends HorizontalDirectionalBlock implements Enti
         return RenderShape.ENTITYBLOCK_ANIMATED;
     }
 
-    @Override
-    public void appendHoverText(ItemStack stack, @Nullable BlockGetter level, List<Component> tooltip, TooltipFlag flag) {
-        super.appendHoverText(stack, level, tooltip, flag);
-        String text = "本模组由夢少 QQ：23628528 和 牛马 QQ：3494126977 以及贴图美工 鱼子酱\n合作制作 感谢使用 感谢喜欢 BUG反馈可联系";
-        Component rainbow = Component.empty();
-        for (int i = 0; i < text.length(); i++) {
-            int color = rainbowColor(i, text.length());
-            rainbow = rainbow.copy().append(Component.literal(String.valueOf(text.charAt(i)))
-                    .withStyle(style -> style.withColor(TextColor.fromRgb(color))));
-        }
-        tooltip.add(rainbow);
-    }
-
-    private static int rainbowColor(int index, int total) {
-        float hue = (float) index / total;
-        float saturation = 1.0f;
-        float value = 1.0f;
-        int h = (int) (hue * 6);
-        float f = hue * 6 - h;
-        float p = value * (1 - saturation);
-        float q = value * (1 - f * saturation);
-        float t = value * (1 - (1 - f) * saturation);
-        float r, g, b;
-        switch (h % 6) {
-            case 0: r = value; g = t; b = p; break;
-            case 1: r = q; g = value; b = p; break;
-            case 2: r = p; g = value; b = t; break;
-            case 3: r = p; g = q; b = value; break;
-            case 4: r = t; g = p; b = value; break;
-            case 5: r = value; g = p; b = q; break;
-            default: r = 1; g = 1; b = 1;
-        }
-        return ((int) (r * 255) << 16) | ((int) (g * 255) << 8) | (int) (b * 255);
-    }
 }

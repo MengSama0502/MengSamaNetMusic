@@ -4,7 +4,6 @@ import com.mengsama.mod.mengsamanetmusic.api.SongInfo;
 import com.mengsama.mod.mengsamanetmusic.block.IMusicPlayerBlockEntity;
 import com.mengsama.mod.mengsamanetmusic.gui.MusicPlayerPlaylistMenu;
 import com.mengsama.mod.mengsamanetmusic.init.ModItems;
-import com.mengsama.mod.mengsamanetmusic.item.MusicCDItem;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.FriendlyByteBuf;
@@ -51,10 +50,19 @@ public class BlockAddSongPacket {
                 var level = sender.level();
                 if (level.getBlockEntity(message.blockPos) instanceof IMusicPlayerBlockEntity be) {
 
-                    ItemStack cdStack = new ItemStack(ModItems.MUSIC_CD.get());
-                    MusicCDItem.setSongInfo(message.songInfo, cdStack);
+                    ItemStack cdStack = new ItemStack(ModItems.MUSIC_LIST.get());
+                    com.mengsama.mod.mengsamanetmusic.item.MusicListItem.addSongInfo(message.songInfo, cdStack);
 
                     var playerInv = be.getPlayerInv();
+                    for (int i = 0; i < playerInv.getSlots(); i++) {
+                        ItemStack existingStack = playerInv.getStackInSlot(i);
+                        if (existingStack.isEmpty()) continue;
+                        SongInfo existing = com.mengsama.mod.mengsamanetmusic.item.MusicListItem.getSongInfo(existingStack);
+                        if (message.songInfo.sameIdentity(existing)) {
+                            sender.sendSystemMessage(net.minecraft.network.chat.Component.translatable("message.mengsamanetmusic.duplicate_song"));
+                            return;
+                        }
+                    }
                     int targetSlot = -1;
                     for (int i = 0; i < playerInv.getSlots(); i++) {
                         if (playerInv.getStackInSlot(i).isEmpty()) {
@@ -67,11 +75,6 @@ public class BlockAddSongPacket {
                         playerInv.insertItem(targetSlot, cdStack, false);
                         be.markDirty();
 
-                        if (message.playNow && message.songInfo.songUrl != null && !message.songInfo.songUrl.isEmpty()) {
-                            be.setPlayIndex(targetSlot);
-                            be.setPlay(true);
-                            be.setPlayToClient(message.songInfo);
-                        }
                     }
                 }
             });

@@ -22,6 +22,10 @@ public final class ConfigManager {
             if (qqCookie != null && !qqCookie.isBlank()) {
                 MengSamaNetMusic.LOGGER.info("QQ Music Cookie configured (length={})", qqCookie.length());
             }
+            String musicKitToken = ModConfig.APPLE_MUSICKIT_TOKEN.get();
+            if (musicKitToken != null && !musicKitToken.isBlank()) {
+                MengSamaNetMusic.LOGGER.info("Apple MusicKit token configured for compliant future catalog use (length={}); preview playback remains iTunes previewUrl only", musicKitToken.length());
+            }
 
             MengSamaNetMusic.LOGGER.info("MengSamaNetMusic config reloaded successfully.");
         } catch (Exception e) {

@@ -1,7 +1,6 @@
 package com.mengsama.mod.mengsamanetmusic.init;
 
 import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
-import com.mengsama.mod.mengsamanetmusic.item.MusicCDItem;
 import com.mengsama.mod.mengsamanetmusic.item.MusicListItem;
 import com.mengsama.mod.mengsamanetmusic.item.MusicPlayerItem;
 import net.minecraft.core.registries.Registries;
@@ -18,7 +17,6 @@ public class ModItems {
     public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(ForgeRegistries.ITEMS, MengSamaNetMusic.MOD_ID);
     public static final DeferredRegister<CreativeModeTab> CREATIVE_TABS = DeferredRegister.create(Registries.CREATIVE_MODE_TAB, MengSamaNetMusic.MOD_ID);
 
-    public static final RegistryObject<Item> MUSIC_CD = ITEMS.register("music_cd", MusicCDItem::new);
     public static final RegistryObject<Item> MUSIC_PLAYER = ITEMS.register("music_player",
             () -> new MusicPlayerItem(ModBlocks.PORTABLE_MUSIC_PLAYER.get(), new Item.Properties().stacksTo(1)));
     public static final RegistryObject<Item> MUSIC_LIST = ITEMS.register("music_list", MusicListItem::new);

@@ -2,10 +2,12 @@ package com.mengsama.mod.mengsamanetmusic.cache;
 
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
+import com.mengsama.mod.mengsamanetmusic.util.AsyncIoExecutor;
 import com.mengsama.mod.mengsamanetmusic.util.NetMusicListUtil;
 import net.minecraftforge.fml.loading.FMLPaths;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -14,18 +16,33 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class CacheManager {
     private static Map<String, String> musicCache = new ConcurrentHashMap<>();
     private static final Gson GSON = new Gson();
-    private static final ExecutorService EXECUTOR_SERVICE = Executors.newFixedThreadPool(5);
+    private static final java.util.concurrent.ExecutorService EXECUTOR_SERVICE = AsyncIoExecutor.executor();
     public static final String DIR_NAME = "netMusicListCache";
     public static final String INDEX_FILE_NAME = "index.json";
-    public static Path PATH = FMLPaths.CONFIGDIR.get().resolve(DIR_NAME);
-    public static final List<FileDownloadThread> threads = new CopyOnWriteArrayList<>();
+    public static Path PATH = java.util.Optional.ofNullable(FMLPaths.CONFIGDIR.get())
+            .orElse(Paths.get("config")).resolve(DIR_NAME);
+    private static final ConcurrentLinkedQueue<FileDownloadThread> ACTIVE_DOWNLOADS = new ConcurrentLinkedQueue<>();
+    public static final List<FileDownloadThread> threads = new java.util.AbstractList<>() {
+        @Override public FileDownloadThread get(int index) {
+            if (index < 0) throw new IndexOutOfBoundsException(index);
+            int current = 0;
+            for (FileDownloadThread thread : ACTIVE_DOWNLOADS) if (current++ == index) return thread;
+            throw new IndexOutOfBoundsException(index);
+        }
+        @Override public int size() { return ACTIVE_DOWNLOADS.size(); }
+        @Override public boolean add(FileDownloadThread thread) { return ACTIVE_DOWNLOADS.add(thread); }
+        @Override public FileDownloadThread remove(int index) {
+            FileDownloadThread thread = get(index);
+            return ACTIVE_DOWNLOADS.remove(thread) ? thread : null;
+        }
+        @Override public Iterator<FileDownloadThread> iterator() { return ACTIVE_DOWNLOADS.iterator(); }
+    };
+    private static volatile boolean indexDirty;
 
     public static void firstTimeInit() {
         try {
@@ -41,8 +58,9 @@ public class CacheManager {
     @SuppressWarnings("all")
     public static void load() {
         try {
-            musicCache = (Map<String, String>) GSON.fromJson(Files.readString(PATH.resolve(INDEX_FILE_NAME)),
+            Map<String, String> loaded = (Map<String, String>) GSON.fromJson(Files.readString(PATH.resolve(INDEX_FILE_NAME)),
                     TypeToken.get(Object.class));
+            musicCache = loaded == null ? new ConcurrentHashMap<>() : new ConcurrentHashMap<>(loaded);
             checkCache();
         } catch (Exception e) {
             e.printStackTrace();
@@ -50,12 +68,27 @@ public class CacheManager {
         }
     }
 
-    public static void save() {
+    public static synchronized void save() {
         try {
-            Files.writeString(PATH.resolve(INDEX_FILE_NAME), GSON.toJson(musicCache));
+            Files.createDirectories(PATH);
+            Path index = PATH.resolve(INDEX_FILE_NAME);
+            Path temporary = PATH.resolve(INDEX_FILE_NAME + ".tmp");
+            Files.writeString(temporary, GSON.toJson(musicCache), StandardOpenOption.CREATE,
+                    StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+            try {
+                Files.move(temporary, index, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+                Files.move(temporary, index, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            indexDirty = false;
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    public static void flush() {
+        if (indexDirty) save();
     }
 
     public static int checkCache(boolean andClear) {
@@ -63,13 +96,13 @@ public class CacheManager {
         musicCache.forEach((k, v) -> {
             var file = PATH.resolve(v + ".mp3");
             try {
-                if (!file.toFile().isFile() || isHtmlOrErrorResponse(Files.readAllBytes(file))) keys.add(k);
+                if (!file.toFile().isFile() || isHtmlOrErrorResponse(file)) keys.add(k);
             } catch (IOException e) {
                 keys.add(k);
             }
         });
         keys.forEach(l -> {
-            if (andClear) deleteCache(Long.parseLong(l));
+            if (andClear) deleteCacheFiles(l);
             musicCache.remove(l);
         });
         if (!keys.isEmpty()) save();
@@ -82,8 +115,8 @@ public class CacheManager {
 
     private static void startDownload(String downloadUrl, long resourceId, String fileType, String uuid) {
         var thread = new FileDownloadThread(downloadUrl, resourceId, fileType, uuid);
-        EXECUTOR_SERVICE.submit(thread);
         threads.add(thread);
+        thread.run();
     }
 
     public static void startImgDownload(long resourceId, String uuid) {
@@ -128,7 +161,7 @@ public class CacheManager {
 
     private static void addCache(long resourceId, String uuid) {
         musicCache.put(String.valueOf(resourceId), uuid);
-        save();
+        indexDirty = true;
     }
 
     public static boolean hasCache(long resourceId) {
@@ -167,18 +200,20 @@ public class CacheManager {
     }
 
     public static void tick() {
-        List<FileDownloadThread> toRemove = new ArrayList<>();
-        for (FileDownloadThread t : threads) {
+        boolean completedBatch = false;
+        for (var iterator = threads.iterator(); iterator.hasNext();) {
+            FileDownloadThread t = iterator.next();
             if (t.isCompleted()) {
                 if (Objects.equals(t.getFileType(), ".mp3")) {
                     addCache(t.getResourceId(), t.getThreadId());
+                    completedBatch = true;
                 }
-                toRemove.add(t);
+                iterator.remove();
             } else if (t.isFailed()) {
-                toRemove.add(t);
+                iterator.remove();
             }
         }
-        threads.removeAll(toRemove);
+        if (completedBatch) save();
     }
 
     public static float getDownloadProgress(long resourceId) {
@@ -195,11 +230,20 @@ public class CacheManager {
     }
 
     public static void deleteCache(long resourceId) {
+        String key = String.valueOf(resourceId);
         if (!hasCache(resourceId)) return;
+        deleteCacheFiles(key);
+        musicCache.remove(key);
+        save();
+    }
+
+    private static void deleteCacheFiles(String key) {
+        String uuid = musicCache.get(key);
+        if (uuid == null) return;
         List<Path> paths = new ArrayList<>();
-        paths.add(PATH.resolve(musicCache.get(String.valueOf(resourceId)) + ".lyc.json"));
-        paths.add(getImageCache(resourceId));
-        paths.add(PATH.resolve(musicCache.get(String.valueOf(resourceId)) + ".mp3"));
+        paths.add(PATH.resolve(uuid + ".lyc.json"));
+        paths.add(PATH.resolve(uuid + ".png"));
+        paths.add(PATH.resolve(uuid + ".mp3"));
         paths.forEach(path -> {
             if (path != null) {
                 try {
@@ -208,8 +252,6 @@ public class CacheManager {
                 }
             }
         });
-        musicCache.remove(String.valueOf(resourceId));
-        save();
     }
 
     private static final String[] HTML_STARTS = {
@@ -223,6 +265,16 @@ public class CacheManager {
             "404",
             "500"
     };
+
+    static boolean isHtmlOrErrorResponse(Path file) throws IOException {
+        try (InputStream input = Files.newInputStream(file)) {
+            return isHtmlOrErrorResponse(readHeader(input));
+        }
+    }
+
+    static byte[] readHeader(InputStream input) throws IOException {
+        return input.readNBytes(1024);
+    }
 
     public static boolean isHtmlOrErrorResponse(byte[] data) {
         if (data == null || data.length < 10) {

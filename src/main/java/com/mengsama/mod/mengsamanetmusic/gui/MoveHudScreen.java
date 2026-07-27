@@ -1,101 +1,292 @@
 package com.mengsama.mod.mengsamanetmusic.gui;
 
-import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
+import com.mengsama.mod.mengsamanetmusic.client.BackgroundImporter;
+import com.mengsama.mod.mengsamanetmusic.client.MusicPlayerBackground;
+import com.mengsama.mod.mengsamanetmusic.config.MusicHudConfig;
+import com.mengsama.mod.mengsamanetmusic.config.MusicPlayerUiConfig;
 import com.mengsama.mod.mengsamanetmusic.hud.MusicInfoHud;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import org.jetbrains.annotations.NotNull;
 
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+
+/** Pure client-side in-game HUD editor with a resolution-adaptive side panel. */
 public class MoveHudScreen extends Screen {
-    public int x;
-    public int y;
     private final Screen parent;
+    private final MusicHudConfig.Data originalHud;
+    private final ThemeColorEditor colorEditor;
+    private boolean dragging;
+    private boolean syncingControls;
+    private double dragOffsetX, dragOffsetY;
+    private EditBox hexBox;
+    private ChannelSlider red, green, blue, alpha;
+    private Button accentTab, backgroundTab;
+    private Component validationMessage = Component.empty();
+    private MoveHudLayout.Layout layout;
 
     public MoveHudScreen(Screen parent) {
-        super(Component.empty());
+        super(Component.translatable("gui.mengsamanetmusic.hud_editor.title"));
         this.parent = parent;
-    }
-
-    @Override
-    protected void init() {
-        super.init();
-        this.addRenderableWidget(Button.builder(
-                        Component.translatable("config.mengsamanetmusic.hud.reset"), button -> {
-                            x = 10;
-                            y = 10;
-                        })
-                .pos(width - 170, height - 30)
-                .size(50, 20)
-                .build());
-        this.addRenderableWidget(Button.builder(
-                        Component.translatable("config.mengsamanetmusic.hud.close"),
-                        button -> onClose())
-                .pos(width - 60, height - 30)
-                .size(50, 20)
-                .build());
-        this.addRenderableWidget(Button.builder(
-                        Component.translatable("config.mengsamanetmusic.hud.not_save"),
-                        button -> Minecraft.getInstance().setScreen(parent))
-                .pos(width - 115, height - 30)
-                .size(50, 20)
-                .build());
-
-        x = 10;
-        y = 10;
-
-        try {
-            Class<?> configClass = Class.forName("com.mengsama.mod.mengsamanetmusic.config.ClientConfig");
-            Object hudX = configClass.getField("hudX").get(null);
-            Object hudY = configClass.getField("hudY").get(null);
-            if (hudX instanceof Integer) x = (int) hudX;
-            if (hudY instanceof Integer) y = (int) hudY;
-        } catch (Exception ignored) {
-        }
-    }
-
-    @Override
-    public void render(@NotNull GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
-        renderBackground(guiGraphics);
-        super.render(guiGraphics, mouseX, mouseY, partialTick);
-        guiGraphics.fill(x, y, x + 100, y + 40, 0xFFAAAAAA);
-        guiGraphics.drawCenteredString(Minecraft.getInstance().font,
-                Component.translatable("config.mengsamanetmusic.hud.text"),
-                x + 50, y + 20 - Minecraft.getInstance().font.lineHeight / 2, 0xFFFFFFFF);
-        guiGraphics.drawCenteredString(Minecraft.getInstance().font,
-                Component.translatable("config.mengsamanetmusic.hud.title"),
-                width / 2, 10, 0xFFFFFFFF);
-    }
-
-    @Override
-    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
-        if (super.mouseDragged(mouseX, mouseY, button, dragX, dragY)) return true;
-        x = (int) mouseX - 50;
-        y = (int) mouseY - 20;
-        return true;
-    }
-
-    @Override
-    public void onClose() {
-
-        try {
-            Class<?> configClass = Class.forName("com.mengsama.mod.mengsamanetmusic.config.ClientConfig");
-            configClass.getField("hudX").set(null, x);
-            configClass.getField("hudY").set(null, y);
-
-            try {
-                configClass.getMethod("saveConfig").invoke(null);
-            } catch (Exception ignored) {
-            }
-        } catch (Exception ignored) {
-        }
-        Minecraft.getInstance().setScreen(parent);
-        MusicInfoHud.setPos(x, y);
+        this.originalHud = MusicHudConfig.copy();
+        this.colorEditor = new ThemeColorEditor(MusicPlayerUiConfig.get());
     }
 
     public static void open() {
-        Minecraft.getInstance().setScreen(new MoveHudScreen(Minecraft.getInstance().screen));
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.setScreen(new MoveHudScreen(minecraft.screen));
     }
+
+    @Override protected void init() {
+        int panelWidth = Math.min(260, Math.max(1, width - MoveHudLayout.MARGIN * 2));
+        int contentWidth = Math.max(1, panelWidth - 14);
+        int wrappedStatusHeight = font.wordWrapHeight(statusComponent(), contentWidth);
+        layout = MoveHudLayout.calculate(width, height, wrappedStatusHeight, font.lineHeight);
+        int x = layout.options().x();
+        int full = layout.options().width();
+        int half = (full - 5) / 2;
+        int y = layout.options().y();
+
+        addRenderableWidget(toggle(x, y, half, "gui.mengsamanetmusic.hud_editor.cover", () -> cfg().showCover, v -> cfg().showCover = v));
+        addRenderableWidget(toggle(x + half + 5, y, half, "gui.mengsamanetmusic.hud_editor.title_element", () -> cfg().showTitle, v -> cfg().showTitle = v)); y += 17;
+        addRenderableWidget(toggle(x, y, half, "gui.mengsamanetmusic.hud_editor.artist", () -> cfg().showArtist, v -> cfg().showArtist = v));
+        addRenderableWidget(toggle(x + half + 5, y, half, "gui.mengsamanetmusic.hud_editor.progress", () -> cfg().showProgress, v -> cfg().showProgress = v)); y += 17;
+        addRenderableWidget(toggle(x, y, half, "gui.mengsamanetmusic.hud_editor.lyrics", () -> cfg().showLyrics, v -> cfg().showLyrics = v));
+        addRenderableWidget(Button.builder(percent("gui.mengsamanetmusic.hud_editor.scale", cfg().scale), b -> {
+            cfg().scale = cfg().scale >= 2F ? 0.5F : cfg().scale + 0.25F;
+            b.setMessage(percent("gui.mengsamanetmusic.hud_editor.scale", cfg().scale));
+        }).bounds(x + half + 5, y, half, 17).build()); y += 17;
+        addRenderableWidget(Button.builder(percent("gui.mengsamanetmusic.hud_editor.opacity", cfg().opacity), b -> {
+            cfg().opacity = cfg().opacity >= 1F ? 0.25F : Math.min(1F, cfg().opacity + 0.15F);
+            b.setMessage(percent("gui.mengsamanetmusic.hud_editor.opacity", cfg().opacity));
+        }).bounds(x, y, half, 17).build());
+
+        List<MoveHudLayout.Rect> targets = layout.colorTargets();
+        addRenderableWidget(colorButton(targets.get(0), "gui.mengsamanetmusic.hud_editor.text_color", false, false));
+        MoveHudLayout.Rect accentRect = targets.get(1);
+        accentTab = addRenderableWidget(Button.builder(Component.translatable("gui.mengsamanetmusic.hud_editor.accent_tab"),
+                b -> switchTarget(ThemeColorEditor.Target.ACCENT)).bounds(accentRect.x(), accentRect.y(), accentRect.width(), accentRect.height()).build());
+        addRenderableWidget(colorButton(targets.get(2), "gui.mengsamanetmusic.hud_editor.secondary_text_color", false, true));
+        MoveHudLayout.Rect backgroundRect = targets.get(3);
+        backgroundTab = addRenderableWidget(Button.builder(Component.translatable("gui.mengsamanetmusic.hud_editor.background_tab"),
+                b -> switchTarget(ThemeColorEditor.Target.BACKGROUND)).bounds(backgroundRect.x(), backgroundRect.y(), backgroundRect.width(), backgroundRect.height()).build());
+
+        MoveHudLayout.Rect rgb = layout.rgbControls();
+        x = rgb.x();
+        y = rgb.y();
+        full = rgb.width();
+        half = Math.max(1, (full - 5) / 2);
+        red = addRenderableWidget(new ChannelSlider(x, y, half, "R"));
+        green = addRenderableWidget(new ChannelSlider(x + half + 5, y, half, "G")); y += 18;
+        blue = addRenderableWidget(new ChannelSlider(x, y, half, "B"));
+        alpha = addRenderableWidget(new ChannelSlider(x + half + 5, y, half, "Alpha")); y += 20;
+        hexBox = new EditBox(font, x + 22, y, full - 88, 18, Component.translatable("gui.mengsamanetmusic.hud_editor.theme_hex"));
+        hexBox.setMaxLength(9);
+        hexBox.setResponder(this::applyHex);
+        addRenderableWidget(hexBox);
+        addRenderableWidget(Button.builder(Component.translatable("gui.mengsamanetmusic.hud_editor.theme_reset"), b -> {
+            colorEditor.resetCurrent();
+            validationMessage = Component.empty();
+            syncColorControls();
+        }).bounds(x + full - 62, y, 62, 18).build());
+        syncColorControls();
+
+        MoveHudLayout.Rect background = layout.backgroundImport();
+        addRenderableWidget(Button.builder(Component.literal("选择背景图片…"), b -> chooseBackground())
+                .bounds(background.x(), background.y(), background.width(), 18).build());
+        MoveHudLayout.Rect cancel = layout.cancel();
+        MoveHudLayout.Rect save = layout.save();
+        addRenderableWidget(Button.builder(Component.translatable("gui.mengsamanetmusic.hud_editor.cancel"), b -> cancel())
+                .bounds(cancel.x(), cancel.y(), cancel.width(), cancel.height()).build());
+        addRenderableWidget(Button.builder(Component.translatable("gui.mengsamanetmusic.hud_editor.save"), b -> save())
+                .bounds(save.x(), save.y(), save.width(), save.height()).build());
+    }
+
+    private Button colorButton(MoveHudLayout.Rect rect, String key, boolean background, boolean secondary) {
+        return Button.builder(Component.translatable(key), b -> {
+            int[] values = background ? new int[]{0xCC101018, 0xCC000000, 0xCC18304A, 0xCC4A1818, 0x00000000}
+                    : new int[]{0xFFFFFFFF, 0xFFFFE082, 0xFF80DEEA, 0xFFA5D6A7, 0xFFFFAB91, 0xFFB8B8C8};
+            if (background) cfg().backgroundColor = next(values, cfg().backgroundColor);
+            else if (secondary) cfg().secondaryTextColor = next(values, cfg().secondaryTextColor);
+            else cfg().textColor = next(values, cfg().textColor);
+        }).bounds(rect.x(), rect.y(), rect.width(), rect.height()).build();
+    }
+
+    private Button toggle(int x, int y, int w, String key, BoolGetter getter, BoolSetter setter) {
+        return Button.builder(toggleLabel(key, getter.get()), b -> {
+            boolean value = !getter.get(); setter.set(value); b.setMessage(toggleLabel(key, value));
+        }).bounds(x, y, w, 17).build();
+    }
+
+    @Override public void render(@NotNull GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+        renderBackground(g);
+        MoveHudLayout.Rect panel = layout.panel();
+        g.fill(panel.x(), panel.y(), panel.right(), panel.bottom(), 0xE008080C);
+        g.drawCenteredString(font, title, panel.x() + panel.width() / 2, 7, 0xFFFFFFFF);
+        if (panel.x() > 120) g.drawString(font, Component.translatable("gui.mengsamanetmusic.hud_editor.hint"), 8, height - 18, 0xFFFFFFFF);
+        if (hexBox != null) {
+            int previewX = hexBox.getX() - 21;
+            g.fill(previewX, hexBox.getY(), previewX + 18, hexBox.getY() + 18, colorEditor.argb());
+            g.renderOutline(previewX, hexBox.getY(), 18, 18, MusicPlayerUiConfig.Values.contrastText(colorEditor.rgb()));
+        }
+        if (accentTab != null) {
+            Button selected = colorEditor.target() == ThemeColorEditor.Target.ACCENT ? accentTab : backgroundTab;
+            g.renderOutline(selected.getX() - 1, selected.getY() - 1, selected.getWidth() + 2, selected.getHeight() + 2,
+                    MusicPlayerUiConfig.get().accent());
+        }
+        MoveHudLayout.Rect background = layout.backgroundImport();
+        if (background.height() > 18) {
+            g.drawString(font, Component.literal("支持 JPG/JPEG/PNG/GIF，导入后自动应用"), background.x(), background.y() + 21, 0xFFAAAAAA);
+        }
+        MoveHudLayout.Rect status = layout.status();
+        List<net.minecraft.util.FormattedCharSequence> lines = font.split(statusComponent(), status.width());
+        int color = isErrorStatus() ? 0xFFFF6666 : 0xFFAAFFAA;
+        int count = Math.min(layout.statusLines(), lines.size());
+        for (int i = 0; i < count; i++) g.drawString(font, lines.get(i), status.x(), status.y() + i * font.lineHeight, color);
+        MusicInfoHud.renderPreview(g);
+        super.render(g, mouseX, mouseY, partialTick);
+    }
+
+    private Component statusComponent() {
+        String state = MusicPlayerBackground.status();
+        if (validationMessage.getString().isEmpty()) return Component.literal(state);
+        return Component.literal(validationMessage.getString() + (state.isBlank() ? "" : " · " + state));
+    }
+
+    private boolean isErrorStatus() {
+        String status = statusComponent().getString();
+        return status.contains("失败") || status.contains("无效") || status.contains("错误");
+    }
+
+    @Override public boolean mouseClicked(double mx, double my, int button) {
+        if (super.mouseClicked(mx, my, button)) return true;
+        double w = 220 * cfg().scale, h = (cfg().showLyrics ? 66 : 50) * cfg().scale;
+        if (button == 0 && mx < layout.panel().x() && mx >= cfg().x && mx <= cfg().x + w && my >= cfg().y && my <= cfg().y + h) {
+            dragging = true; dragOffsetX = mx - cfg().x; dragOffsetY = my - cfg().y; return true;
+        }
+        return false;
+    }
+
+    @Override public boolean mouseDragged(double mx, double my, int button, double dx, double dy) {
+        if (dragging && button == 0) {
+            cfg().x = Math.max(0, Math.min(Math.max(0, layout.panel().x() - (int) (220 * cfg().scale)), (int) (mx - dragOffsetX)));
+            cfg().y = Math.max(0, Math.min(Math.max(0, height - (int) ((cfg().showLyrics ? 66 : 50) * cfg().scale)), (int) (my - dragOffsetY)));
+            return true;
+        }
+        return super.mouseDragged(mx, my, button, dx, dy);
+    }
+
+    @Override public boolean mouseReleased(double mx, double my, int button) {
+        if (button == 0 && dragging) { dragging = false; return true; }
+        return super.mouseReleased(mx, my, button);
+    }
+
+    @Override public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (keyCode == 256) { cancel(); return true; }
+        return super.keyPressed(keyCode, scanCode, modifiers);
+    }
+
+    private void switchTarget(ThemeColorEditor.Target target) {
+        colorEditor.switchTo(target);
+        validationMessage = Component.empty();
+        syncColorControls();
+    }
+
+    private void applyHex(String text) {
+        if (syncingControls) return;
+        if (colorEditor.applyHex(text)) {
+            validationMessage = Component.empty();
+            syncSlidersOnly();
+        } else validationMessage = Component.translatable("gui.mengsamanetmusic.hud_editor.invalid_hex");
+    }
+
+    private void applyChannels() {
+        if (syncingControls) return;
+        colorEditor.setRgb((red.channel() << 16) | (green.channel() << 8) | blue.channel());
+        if (colorEditor.target() == ThemeColorEditor.Target.BACKGROUND) colorEditor.setAlpha(alpha.channel());
+        validationMessage = Component.empty();
+        syncingControls = true;
+        hexBox.setValue(colorEditor.hex());
+        syncingControls = false;
+    }
+
+    private void syncColorControls() {
+        syncSlidersOnly();
+        syncingControls = true;
+        hexBox.setValue(colorEditor.hex());
+        syncingControls = false;
+        boolean background = colorEditor.target() == ThemeColorEditor.Target.BACKGROUND;
+        alpha.visible = background;
+        alpha.active = background;
+    }
+
+    private void syncSlidersOnly() {
+        syncingControls = true;
+        int rgb = colorEditor.rgb();
+        red.setChannel(rgb >>> 16); green.setChannel(rgb >>> 8); blue.setChannel(rgb);
+        alpha.setChannel(colorEditor.alpha());
+        syncingControls = false;
+    }
+
+    private void chooseBackground() {
+        CompletableFuture.supplyAsync(() -> {
+            try {
+                String selected = org.lwjgl.util.tinyfd.TinyFileDialogs.tinyfd_openFileDialog(
+                        "选择播放器背景", "", (org.lwjgl.PointerBuffer) null, "JPG/JPEG/PNG/GIF 图片", false);
+                if (selected == null || selected.isBlank()) return "已取消选择";
+                java.nio.file.Path applied = BackgroundImporter.importAndConfigure(java.nio.file.Path.of(selected));
+                return "已复制 " + applied.getFileName() + "，正在解码…";
+            } catch (Exception ex) {
+                return "背景应用失败：" + (ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage());
+            }
+        }, net.minecraft.Util.backgroundExecutor()).thenAccept(message -> Minecraft.getInstance().execute(() -> {
+            validationMessage = Component.literal(message);
+            if (message.startsWith("已复制")) MusicPlayerBackground.reload();
+            rebuildWidgets();
+        }));
+    }
+
+    private void save() {
+        MusicHudConfig.save();
+        try { MusicPlayerUiConfig.save(); }
+        catch (Exception ex) { validationMessage = Component.translatable("gui.mengsamanetmusic.hud_editor.save_failed"); rebuildWidgets(); return; }
+        Minecraft.getInstance().setScreen(parent);
+    }
+
+    private void cancel() {
+        dragging = false;
+        MusicHudConfig.restore(originalHud);
+        colorEditor.cancel();
+        Minecraft.getInstance().setScreen(parent);
+    }
+
+    private MusicHudConfig.Data cfg() { return MusicHudConfig.get(); }
+    private static int next(int[] values, int current) {
+        for (int i = 0; i < values.length; i++) if (values[i] == current) return values[(i + 1) % values.length];
+        return values[0];
+    }
+    private static Component toggleLabel(String key, boolean value) {
+        return Component.translatable(key).append(": ").append(Component.translatable(value ? "options.on" : "options.off"));
+    }
+    private static Component percent(String key, float value) {
+        return Component.translatable(key).append(": " + Math.round(value * 100) + "%");
+    }
+
+    private final class ChannelSlider extends AbstractSliderButton {
+        private final String label;
+        ChannelSlider(int x, int y, int width, String label) { super(x, y, width, 17, Component.empty(), 0); this.label = label; updateMessage(); }
+        int channel() { return Math.max(0, Math.min(255, (int) Math.round(value * 255))); }
+        void setChannel(int channel) { value = Math.max(0, Math.min(255, channel & 255)) / 255D; updateMessage(); }
+        @Override protected void updateMessage() { setMessage(Component.literal(label + ": " + channel())); }
+        @Override protected void applyValue() { applyChannels(); }
+    }
+
+    @FunctionalInterface private interface BoolGetter { boolean get(); }
+    @FunctionalInterface private interface BoolSetter { void set(boolean value); }
 }

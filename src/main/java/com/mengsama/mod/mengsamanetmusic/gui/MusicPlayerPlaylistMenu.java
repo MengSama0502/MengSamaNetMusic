@@ -5,7 +5,6 @@ import com.mengsama.mod.mengsamanetmusic.block.IMusicPlayerBlockEntity;
 import com.mengsama.mod.mengsamanetmusic.block.MusicPlayerBlockEntity;
 import com.mengsama.mod.mengsamanetmusic.block.PortableMusicPlayerBlockEntity;
 import com.mengsama.mod.mengsamanetmusic.init.ModMenuTypes;
-import com.mengsama.mod.mengsamanetmusic.item.MusicCDItem;
 import com.mengsama.mod.mengsamanetmusic.item.MusicListItem;
 import com.mengsama.mod.mengsamanetmusic.network.ModNetwork;
 import com.mengsama.mod.mengsamanetmusic.util.PlayMode;
@@ -66,6 +65,27 @@ public class MusicPlayerPlaylistMenu extends AbstractContainerMenu {
         }
     }
 
+    public String getTargetId() {
+        if (blockEntity == null || blockEntity.getLevel() == null) return "missing-block";
+        return "block:" + blockEntity.getLevel().dimension().location() + ":" + blockEntity.getBlockPos().asLong();
+    }
+
+    private void sendStop() {
+        if (blockEntity != null && blockEntity.getLevel() != null) {
+            ModNetwork.sendToNearby(blockEntity.getLevel(), blockEntity.getBlockPos(), new com.mengsama.mod.mengsamanetmusic.network.StopMusicPacketClient(getTargetId()));
+        }
+    }
+
+    private void sendPause(boolean paused) {
+        if (blockEntity != null && blockEntity.getLevel() != null) {
+            long generation = blockEntity instanceof MusicPlayerBlockEntity fixed ? fixed.currentRequestGeneration()
+                    : blockEntity instanceof PortableMusicPlayerBlockEntity portable ? portable.currentRequestGeneration()
+                    : Long.MIN_VALUE;
+            ModNetwork.sendToNearby(blockEntity.getLevel(), blockEntity.getBlockPos(),
+                    new com.mengsama.mod.mengsamanetmusic.network.PauseMusicPacketClient(getTargetId(), paused, generation));
+        }
+    }
+
     public IMusicPlayerBlockEntity getBlockEntity() {
         return blockEntity;
     }
@@ -111,12 +131,7 @@ public class MusicPlayerPlaylistMenu extends AbstractContainerMenu {
     }
 
     private SongInfo getSongInfoFromCd(ItemStack cd) {
-        if (cd.getItem() instanceof MusicListItem) {
-            return MusicListItem.getSongInfo(cd);
-        } else if (cd.getItem() instanceof MusicCDItem) {
-            return MusicCDItem.getSongInfo(cd);
-        }
-        return null;
+        return cd.getItem() instanceof MusicListItem ? MusicListItem.getSongInfo(cd) : null;
     }
 
     @Override
@@ -127,12 +142,10 @@ public class MusicPlayerPlaylistMenu extends AbstractContainerMenu {
         switch (buttonId) {
             case BUTTON_PLAY -> {
                 if (blockEntity.isPlay()) {
-                    blockEntity.setPlay(false);
-                    blockEntity.markDirty();
-                    if (blockEntity.getLevel() != null) {
-                        ModNetwork.sendToNearby(blockEntity.getLevel(), blockEntity.getBlockPos(),
-                                new com.mengsama.mod.mengsamanetmusic.network.StopMusicPacketClient(-1, ""));
-                    }
+                    boolean paused = !blockEntity.isPaused();
+                    // Pause is independent from the active playback session. Closing the menu must not resume it.
+                    blockEntity.setPaused(paused);
+                    sendPause(paused);
                 } else {
                     ItemStack currentCd = blockEntity.getCurrentCd();
                     if (currentCd.isEmpty()) return true;
@@ -145,19 +158,14 @@ public class MusicPlayerPlaylistMenu extends AbstractContainerMenu {
             }
             case BUTTON_STOP -> {
                 blockEntity.setPlay(false);
+                blockEntity.setCurrentTime(0);
                 blockEntity.markDirty();
-                if (blockEntity.getLevel() != null) {
-                    ModNetwork.sendToNearby(blockEntity.getLevel(), blockEntity.getBlockPos(),
-                            new com.mengsama.mod.mengsamanetmusic.network.StopMusicPacketClient(-1, ""));
-                }
+                sendStop();
             }
             case BUTTON_NEXT -> {
                 blockEntity.setPlay(false);
                 blockEntity.markDirty();
-                if (blockEntity.getLevel() != null) {
-                    ModNetwork.sendToNearby(blockEntity.getLevel(), blockEntity.getBlockPos(),
-                            new com.mengsama.mod.mengsamanetmusic.network.StopMusicPacketClient(-1, ""));
-                }
+                sendStop();
                 blockEntity.advanceToNext();
                 ItemStack currentCd = blockEntity.getCurrentCd();
                 if (currentCd.isEmpty()) return true;
@@ -170,10 +178,7 @@ public class MusicPlayerPlaylistMenu extends AbstractContainerMenu {
             case BUTTON_PREV -> {
                 blockEntity.setPlay(false);
                 blockEntity.markDirty();
-                if (blockEntity.getLevel() != null) {
-                    ModNetwork.sendToNearby(blockEntity.getLevel(), blockEntity.getBlockPos(),
-                            new com.mengsama.mod.mengsamanetmusic.network.StopMusicPacketClient(-1, ""));
-                }
+                sendStop();
                 int currentIndex = blockEntity.getPlayIndex();
                 var playerInv = blockEntity.getPlayerInv();
                 int prevIndex = currentIndex - 1;
@@ -207,10 +212,7 @@ public class MusicPlayerPlaylistMenu extends AbstractContainerMenu {
                         if (index == blockEntity.getPlayIndex() && blockEntity.isPlay()) {
                             blockEntity.setPlay(false);
                             blockEntity.markDirty();
-                            if (blockEntity.getLevel() != null) {
-                                ModNetwork.sendToNearby(blockEntity.getLevel(), blockEntity.getBlockPos(),
-                                        new com.mengsama.mod.mengsamanetmusic.network.StopMusicPacketClient(-1, ""));
-                            }
+                            sendStop();
                         }
                         playerInv.setStackInSlot(index, ItemStack.EMPTY);
                         blockEntity.markDirty();
@@ -236,10 +238,7 @@ public class MusicPlayerPlaylistMenu extends AbstractContainerMenu {
                     if (index >= 0 && index < playerInv.getSlots() && !playerInv.getStackInSlot(index).isEmpty()) {
                         blockEntity.setPlay(false);
                         blockEntity.markDirty();
-                        if (blockEntity.getLevel() != null) {
-                            ModNetwork.sendToNearby(blockEntity.getLevel(), blockEntity.getBlockPos(),
-                                    new com.mengsama.mod.mengsamanetmusic.network.StopMusicPacketClient(-1, ""));
-                        }
+                        sendStop();
                         blockEntity.setPlayIndex(index);
                         ItemStack currentCd = blockEntity.getCurrentCd();
                         if (!currentCd.isEmpty()) {

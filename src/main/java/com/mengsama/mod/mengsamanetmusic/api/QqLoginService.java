@@ -1,402 +1,207 @@
 package com.mengsama.mod.mengsamanetmusic.api;
 
-import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mengsama.mod.mengsamanetmusic.MengSamaNetMusic;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
 import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public final class QqLoginService {
-    private static final String APPID = "716027609";
-    private static final String THIRD_APPID = "100497308";
-    private static final String REDIRECT_URI = "https://y.qq.com/wk_v17/common_login.html?type=QQ&&redirect=";
-    private static final String QR_SHOW_URL = "https://xui.ptlogin2.qq.com/ssl/ptqrshow";
-    private static final String QR_LOGIN_URL = "https://xui.ptlogin2.qq.com/ssl/ptqrlogin";
-    private static final String AUTHORIZE_URL = "https://graph.qq.com/oauth2.0/authorize";
-    private static final String MUSICU_URL = "https://u6.y.qq.com/cgi-bin/musicu.fcg";
-    private static final Pattern PTUI_CB = Pattern.compile("ptuiCB\\('(\\d+)','[^']*','([^']*)','[^']*','([^']*)'");
-    private static final Pattern CODE_PATTERN = Pattern.compile("code=([^&]+)");
-
-    private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor(new ThreadFactory() {
-        private final AtomicInteger counter = new AtomicInteger(1);
-
-        @Override
-        public Thread newThread(Runnable r) {
-            Thread t = new Thread(r, "mengsamanetmusic-qq-login-" + counter.getAndIncrement());
-            t.setDaemon(true);
-            return t;
-        }
+    private static final String LOGIN_APP_ID = "716027609";
+    private static final String MUSIC_APP_ID = "100497308";
+    private static final URI QR_IMAGE_ENDPOINT = URI.create("https://xui.ptlogin2.qq.com/ssl/ptqrshow");
+    private static final URI QR_STATUS_ENDPOINT = URI.create("https://xui.ptlogin2.qq.com/ssl/ptqrlogin");
+    private static final URI AUTH_ENDPOINT = URI.create("https://graph.qq.com/oauth2.0/authorize");
+    private static final URI MUSIC_LOGIN_ENDPOINT = URI.create("https://u6.y.qq.com/cgi-bin/musicu.fcg");
+    private static final String CALLBACK = "https://y.qq.com/wk_v17/common_login.html?type=QQ&&redirect=";
+    private static final String LOGIN_JUMP = "https://graph.qq.com/oauth2.0/login_jump";
+    private static final Pattern LOGIN_CALLBACK = Pattern.compile("ptuiCB\\('(\\d+)','[^']*','([^']*)','[^']*','([^']*)'");
+    private static final Pattern AUTH_CODE = Pattern.compile("(?:[?&])code=([^&]+)");
+    private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "mengsamanetmusic-qq-auth");
+        thread.setDaemon(true);
+        return thread;
     });
+    private static final HttpClient HTTP = HttpClient.newBuilder()
+            .executor(EXECUTOR).connectTimeout(Duration.ofSeconds(12))
+            .followRedirects(HttpClient.Redirect.NEVER).build();
 
     public enum LoginState {
         IDLE, FETCHING_QR, WAITING_SCAN, AUTHORIZING, LOGGING_IN, SUCCESS, FAILED, QR_EXPIRED
     }
 
-    private QqLoginService() {
-    }
+    private QqLoginService() {}
 
     public static CompletableFuture<byte[]> fetchQrCode() {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                StringBuilder urlBuilder = new StringBuilder(QR_SHOW_URL);
-                urlBuilder.append("?appid=").append(APPID);
-                urlBuilder.append("&e=2&l=M&s=3&d=72&v=4&t=0.787&daid=383");
-                urlBuilder.append("&pt_3rd_aid=").append(THIRD_APPID);
-                urlBuilder.append("&u1=").append(URLEncoder.encode("https://graph.qq.com/oauth2.0/login_jump", StandardCharsets.UTF_8));
-
-                HttpURLConnection conn = (HttpURLConnection) new URL(urlBuilder.toString()).openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(15000);
-                conn.setReadTimeout(15000);
-                conn.setInstanceFollowRedirects(true);
-                conn.connect();
-
-                String qrsig = null;
-                for (Map.Entry<String, java.util.List<String>> entry : conn.getHeaderFields().entrySet()) {
-                    if (!"Set-Cookie".equalsIgnoreCase(entry.getKey())) continue;
-                    for (String cookieStr : entry.getValue()) {
-                        String val = extractCookieValue(cookieStr, "qrsig");
-                        if (val != null) {
-                            qrsig = val;
-                            break;
-                        }
-                    }
-                    if (qrsig != null) break;
-                }
-
-                byte[] imageData = conn.getInputStream().readAllBytes();
-                conn.disconnect();
-
-                if (qrsig == null || qrsig.isBlank()) {
-                    MengSamaNetMusic.LOGGER.error("Failed to extract qrsig from QR code response cookies");
-                }
-                MengSamaNetMusic.LOGGER.info("QR code fetched, qrsig present: {}", qrsig != null);
-                QrSession.set(qrsig);
-                return imageData;
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to fetch QR code", e);
-            }
-        }, EXECUTOR);
+        return requestBytes(uriWithQuery(QR_IMAGE_ENDPOINT, Map.of(
+                        "appid", LOGIN_APP_ID, "e", "2", "l", "M", "s", "3", "d", "72", "v", "4",
+                        "t", Double.toString(Math.random()), "daid", "383", "pt_3rd_aid", MUSIC_APP_ID, "u1", LOGIN_JUMP)), "")
+                .thenApply(response -> {
+                    String signature = response.headers().allValues("set-cookie").stream()
+                            .map(value -> cookie(value, "qrsig")).filter(value -> !value.isBlank()).findFirst().orElse("");
+                    if (signature.isBlank()) throw new IllegalStateException("QQ QR response omitted qrsig");
+                    QrSession.set(signature);
+                    return response.body();
+                });
     }
 
     public static CompletableFuture<LoginState> pollLogin() {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                String qrsig = QrSession.getQrsig();
-                if (qrsig == null || qrsig.isBlank()) {
-                    MengSamaNetMusic.LOGGER.error("pollLogin: qrsig is null/blank, cannot poll");
+        String signature = QrSession.getQrsig();
+        if (signature.isBlank()) return CompletableFuture.completedFuture(LoginState.FAILED);
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.put("u1", LOGIN_JUMP);
+        parameters.put("ptqrtoken", Long.toString(calculatePtqrtoken(signature)));
+        parameters.put("ptredirect", "0"); parameters.put("h", "1"); parameters.put("t", "1"); parameters.put("g", "1");
+        parameters.put("from_ui", "1"); parameters.put("ptlang", "2052"); parameters.put("js_ver", "25072815");
+        parameters.put("js_type", "1"); parameters.put("login_sig", ""); parameters.put("pt_uistyle", "40");
+        parameters.put("aid", LOGIN_APP_ID); parameters.put("daid", "383"); parameters.put("pt_3rd_aid", MUSIC_APP_ID);
+        return requestText(uriWithQuery(QR_STATUS_ENDPOINT, parameters), "qrsig=" + signature)
+                .thenCompose(QqLoginService::interpretStatus)
+                .exceptionally(error -> {
+                    MengSamaNetMusic.LOGGER.warn("QQ login poll failed", error);
                     return LoginState.FAILED;
-                }
-                long ptqrtoken = calculatePtqrtoken(qrsig);
-
-                StringBuilder urlBuilder = new StringBuilder(QR_LOGIN_URL);
-                urlBuilder.append("?u1=").append(URLEncoder.encode("https://graph.qq.com/oauth2.0/login_jump", StandardCharsets.UTF_8));
-                urlBuilder.append("&ptqrtoken=").append(ptqrtoken);
-                urlBuilder.append("&ptredirect=0&h=1&t=1&g=1&from_ui=1&ptlang=2052");
-                urlBuilder.append("&js_ver=25072815&js_type=1&login_sig=&pt_uistyle=40");
-                urlBuilder.append("&aid=").append(APPID);
-                urlBuilder.append("&daid=383");
-                urlBuilder.append("&pt_3rd_aid=").append(THIRD_APPID);
-
-                HttpURLConnection conn = (HttpURLConnection) new URL(urlBuilder.toString()).openConnection();
-                conn.setRequestMethod("GET");
-                conn.setRequestProperty("Cookie", "qrsig=" + qrsig);
-                conn.setConnectTimeout(10000);
-                conn.setReadTimeout(10000);
-
-                String body = readResponse(conn);
-                conn.disconnect();
-
-                MengSamaNetMusic.LOGGER.debug("pollLogin response: {}", body);
-
-                Matcher m = PTUI_CB.matcher(body);
-                if (!m.find()) {
-                    MengSamaNetMusic.LOGGER.warn("pollLogin: ptuiCB not found in response");
-                    return LoginState.WAITING_SCAN;
-                }
-
-                String code = m.group(1);
-                MengSamaNetMusic.LOGGER.info("pollLogin: status code = {}", code);
-
-                if ("65".equals(code)) {
-                    return LoginState.QR_EXPIRED;
-                }
-                if (!"0".equals(code)) {
-                    return LoginState.WAITING_SCAN;
-                }
-
-                String checkSigUrl = m.group(2);
-                if (checkSigUrl == null || checkSigUrl.isBlank()) {
-                    checkSigUrl = m.group(3);
-                }
-
-                return processLoginSuccess(checkSigUrl);
-            } catch (Exception e) {
-                MengSamaNetMusic.LOGGER.error("Login poll failed", e);
-                return LoginState.FAILED;
-            }
-        }, EXECUTOR);
+                });
     }
 
-    private static LoginState processLoginSuccess(String checkSigUrl) {
+    private static CompletableFuture<LoginState> interpretStatus(HttpResponse<String> response) {
+        Matcher callback = LOGIN_CALLBACK.matcher(response.body());
+        if (!callback.find()) return CompletableFuture.completedFuture(LoginState.WAITING_SCAN);
+        if ("65".equals(callback.group(1))) return CompletableFuture.completedFuture(LoginState.QR_EXPIRED);
+        if (!"0".equals(callback.group(1))) return CompletableFuture.completedFuture(LoginState.WAITING_SCAN);
+        String verificationUrl = callback.group(2).isBlank() ? callback.group(3) : callback.group(2);
+        return exchangeBrowserSession(URI.create(verificationUrl));
+    }
+
+    private static CompletableFuture<LoginState> exchangeBrowserSession(URI verificationUrl) {
+        return requestText(verificationUrl, "").thenCompose(response -> {
+            Map<String, String> cookies = response.headers().allValues("set-cookie").stream()
+                    .map(QqLoginService::firstCookiePair).filter(pair -> pair.length == 2)
+                    .collect(Collectors.toMap(pair -> pair[0], pair -> pair[1], (left, right) -> right));
+            String uin = cookies.getOrDefault("pt2gguin", "");
+            String oauthToken = cookies.getOrDefault("pt_oauth_token", "");
+            String sessionKey = cookies.getOrDefault("p_skey", "");
+            if (uin.isBlank() || oauthToken.isBlank() || sessionKey.isBlank()) {
+                return CompletableFuture.completedFuture(LoginState.FAILED);
+            }
+            return requestAuthorizationCode(uin, oauthToken, sessionKey)
+                    .thenCompose(code -> code.isBlank() ? CompletableFuture.completedFuture(null) : requestMusicCredential(uin, code))
+                    .thenApply(credential -> {
+                        if (credential == null || !credential.isValid()) return LoginState.FAILED;
+                        QqCredentialManager.save(credential);
+                        return LoginState.SUCCESS;
+                    });
+        });
+    }
+
+    private static CompletableFuture<String> requestAuthorizationCode(String uin, String oauthToken, String sessionKey) {
+        Map<String, String> form = new LinkedHashMap<>();
+        form.put("response_type", "code"); form.put("client_id", MUSIC_APP_ID); form.put("redirect_uri", CALLBACK);
+        form.put("scope", "get_user_info"); form.put("state", "y_new.top.pop.logout"); form.put("switch", "");
+        form.put("from_ptlogin", "1"); form.put("src", "1"); form.put("update_auth", "1"); form.put("openapi", "1010");
+        form.put("g_tk", Long.toString(calculateGtk(sessionKey))); form.put("auth_time", Long.toString(System.currentTimeMillis() / 1000));
+        String cookieHeader = "p_uin=" + uin + "; pt_oauth_token=" + oauthToken + "; p_skey=" + sessionKey;
+        HttpRequest request = HttpRequest.newBuilder(AUTH_ENDPOINT).timeout(Duration.ofSeconds(12))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("Cookie", cookieHeader).POST(HttpRequest.BodyPublishers.ofString(formEncode(form))).build();
+        return HTTP.sendAsync(request, HttpResponse.BodyHandlers.discarding()).thenApply(response -> {
+            String location = response.headers().firstValue("location").orElse("");
+            Matcher matcher = AUTH_CODE.matcher(location);
+            return matcher.find() ? matcher.group(1) : "";
+        });
+    }
+
+    private static CompletableFuture<QqCredential> requestMusicCredential(String uin, String code) {
+        JsonObject common = new JsonObject();
+        common.addProperty("_channelid", "208"); common.addProperty("_os_version", "6.2.9200-2");
+        common.addProperty("authst", ""); common.addProperty("ct", "19"); common.addProperty("cv", "2121");
+        common.addProperty("guid", ""); common.addProperty("patch", "118"); common.addProperty("tmeAppID", "qqmusic");
+        common.addProperty("tmeLoginType", 2); common.addProperty("uin", uin);
+        JsonObject parameters = new JsonObject();
+        parameters.addProperty("appid", Integer.parseInt(MUSIC_APP_ID)); parameters.addProperty("code", code);
+        parameters.addProperty("deviceName", "minecraft"); parameters.addProperty("forceRefreshToken", 0);
+        parameters.addProperty("onlyNeedAccessToken", 0);
+        JsonObject operation = new JsonObject();
+        operation.addProperty("method", "Login"); operation.addProperty("module", "music.login.LoginServer"); operation.add("param", parameters);
+        JsonObject body = new JsonObject(); body.add("comm", common); body.add("music.login.LoginServer.Login", operation);
+        HttpRequest request = HttpRequest.newBuilder(MUSIC_LOGIN_ENDPOINT).timeout(Duration.ofSeconds(15))
+                .header("Content-Type", "application/json; charset=utf-8")
+                .POST(HttpRequest.BodyPublishers.ofString(body.toString())).build();
+        return HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)).thenApply(response -> decodeCredential(response.body()));
+    }
+
+    static QqCredential decodeCredential(String json) {
         try {
-            HttpURLConnection conn = (HttpURLConnection) new URL(checkSigUrl).openConnection();
-            conn.setRequestMethod("GET");
-            conn.setInstanceFollowRedirects(false);
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(10000);
-            conn.connect();
-
-            String uin = null;
-            String ptOauthToken = null;
-            String pSkey = null;
-
-            for (Map.Entry<String, java.util.List<String>> entry : conn.getHeaderFields().entrySet()) {
-                if (!"Set-Cookie".equalsIgnoreCase(entry.getKey())) {
-                    continue;
-                }
-                for (String cookieStr : entry.getValue()) {
-                    String val;
-                    if ((val = extractCookieValue(cookieStr, "pt2gguin")) != null) uin = val;
-                    if ((val = extractCookieValue(cookieStr, "pt_oauth_token")) != null) ptOauthToken = val;
-                    if ((val = extractCookieValue(cookieStr, "p_skey")) != null) pSkey = val;
-                }
-            }
-            conn.disconnect();
-
-            if (uin == null || ptOauthToken == null || pSkey == null) {
-                MengSamaNetMusic.LOGGER.error("Missing login cookies: uin={}, token={}, skey={}", uin != null, ptOauthToken != null, pSkey != null);
-                return LoginState.FAILED;
-            }
-
-            String authCode = authorize(uin, ptOauthToken, pSkey);
-            if (authCode == null) {
-                return LoginState.FAILED;
-            }
-
-            QqCredential cred = loginServer(uin, authCode);
-            if (cred == null) {
-                return LoginState.FAILED;
-            }
-
-            QqCredentialManager.save(cred);
-            MengSamaNetMusic.LOGGER.info("QQ Music login successful, musicid={}", cred.getMusicId());
-            return LoginState.SUCCESS;
-        } catch (Exception e) {
-            MengSamaNetMusic.LOGGER.error("Login processing failed", e);
-            return LoginState.FAILED;
-        }
-    }
-
-    private static String authorize(String uin, String ptOauthToken, String pSkey) throws IOException {
-        long gTk = calculateGtk(pSkey);
-
-        Map<String, String> formData = new LinkedHashMap<>();
-        formData.put("response_type", "code");
-        formData.put("client_id", THIRD_APPID);
-        formData.put("redirect_uri", REDIRECT_URI);
-        formData.put("scope", "get_user_info");
-        formData.put("state", "y_new.top.pop.logout");
-        formData.put("switch", "");
-        formData.put("from_ptlogin", "1");
-        formData.put("src", "1");
-        formData.put("update_auth", "1");
-        formData.put("openapi", "1010");
-        formData.put("g_tk", String.valueOf(gTk));
-        formData.put("auth_time", String.valueOf(System.currentTimeMillis() / 1000));
-
-        StringBuilder formBody = new StringBuilder();
-        for (Map.Entry<String, String> entry : formData.entrySet()) {
-            if (formBody.length() > 0) formBody.append('&');
-            formBody.append(URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8));
-            formBody.append('=');
-            formBody.append(URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8));
-        }
-
-        HttpURLConnection conn = (HttpURLConnection) new URL(AUTHORIZE_URL).openConnection();
-        try {
-            conn.setRequestMethod("POST");
-            conn.setInstanceFollowRedirects(false);
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-            conn.setRequestProperty("Cookie", "p_uin=" + uin + "; pt_oauth_token=" + ptOauthToken + "; p_skey=" + pSkey);
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(10000);
-
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(formBody.toString().getBytes(StandardCharsets.UTF_8));
-            }
-
-            String location = conn.getHeaderField("Location");
-
-            if (location == null) {
-                MengSamaNetMusic.LOGGER.error("Authorization failed: no redirect location");
-                return null;
-            }
-
-            Matcher m = CODE_PATTERN.matcher(location);
-            if (!m.find()) {
-                MengSamaNetMusic.LOGGER.error("Authorization failed: no code in redirect");
-                return null;
-            }
-            return m.group(1);
-        } finally {
-            conn.disconnect();
-        }
-    }
-
-    private static QqCredential loginServer(String uin, String code) throws IOException {
-        JsonObject comm = new JsonObject();
-        comm.addProperty("_channelid", "208");
-        comm.addProperty("_os_version", "6.2.9200-2");
-        comm.addProperty("authst", "");
-        comm.addProperty("ct", "19");
-        comm.addProperty("cv", "2121");
-        comm.addProperty("guid", "");
-        comm.addProperty("patch", "118");
-        comm.addProperty("tmeAppID", "qqmusic");
-        comm.addProperty("tmeLoginType", 2);
-        comm.addProperty("uin", uin);
-
-        JsonObject param = new JsonObject();
-        param.addProperty("appid", Integer.parseInt(THIRD_APPID));
-        param.addProperty("code", code);
-        param.addProperty("deviceName", "minecraft");
-        param.addProperty("forceRefreshToken", 0);
-        param.addProperty("onlyNeedAccessToken", 0);
-
-        JsonObject loginReq = new JsonObject();
-        loginReq.addProperty("method", "Login");
-        loginReq.addProperty("module", "music.login.LoginServer");
-        loginReq.add("param", param);
-
-        JsonObject body = new JsonObject();
-        body.add("comm", comm);
-        body.add("music.login.LoginServer.Login", loginReq);
-
-        String url = MUSICU_URL + "?pcachetime=" + System.currentTimeMillis() / 1000;
-        String response = postJson(url, body.toString());
-
-        JsonObject tree = JsonParser.parseString(response).getAsJsonObject();
-        JsonObject loginResp = tree.getAsJsonObject("music.login.LoginServer.Login");
-        if (loginResp == null || loginResp.get("code").getAsInt() != 0) {
-            MengSamaNetMusic.LOGGER.error("Login server returned error");
+            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+            JsonObject operation = root.getAsJsonObject("music.login.LoginServer.Login");
+            if (operation == null || operation.get("code").getAsInt() != 0) return null;
+            JsonObject data = operation.getAsJsonObject("data");
+            return new QqCredential(string(data, "musicid"), string(data, "musickey"), number(data, "keyExpiresIn", 0),
+                    number(data, "musickeyCreateTime", System.currentTimeMillis() / 1000),
+                    string(data, "refresh_key"), string(data, "refresh_token"));
+        } catch (RuntimeException malformed) {
             return null;
         }
-
-        JsonObject data = loginResp.getAsJsonObject("data");
-        String musicId = data.has("musicid") ? data.get("musicid").getAsString() : "";
-        String musicKey = data.has("musickey") ? data.get("musickey").getAsString() : "";
-        long keyExpiresIn = data.has("keyExpiresIn") ? data.get("keyExpiresIn").getAsLong() : 0;
-        long createTime = data.has("musickeyCreateTime") ? data.get("musickeyCreateTime").getAsLong() : System.currentTimeMillis() / 1000;
-        String refreshKey = data.has("refresh_key") ? data.get("refresh_key").getAsString() : "";
-        String refreshToken = data.has("refresh_token") ? data.get("refresh_token").getAsString() : "";
-
-        return new QqCredential(musicId, musicKey, keyExpiresIn, createTime, refreshKey, refreshToken);
     }
 
-    static long calculatePtqrtoken(String qrsig) {
-        long e = 0;
-        for (int i = 0; i < qrsig.length(); i++) {
-            e += (e << 5) + qrsig.charAt(i);
-            e &= 0x7FFFFFFF;
-        }
-        return e;
+    static long calculatePtqrtoken(String value) { return djb(value, 0); }
+    static long calculateGtk(String value) { return djb(value, 5381); }
+
+    private static long djb(String value, long seed) {
+        long hash = seed;
+        for (int codePoint : value.codePoints().toArray()) hash = ((hash << 5) + hash + codePoint) & 0x7fffffffL;
+        return hash;
     }
 
-    static long calculateGtk(String skey) {
-        long hash = 5381;
-        for (int i = 0; i < skey.length(); i++) {
-            hash += (hash << 5) + skey.charAt(i);
-            hash &= 0x7FFFFFFF;
-        }
-        return hash & 0x7FFFFFFF;
+    private static CompletableFuture<HttpResponse<byte[]>> requestBytes(URI uri, String cookie) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(15)).GET();
+        if (!cookie.isBlank()) builder.header("Cookie", cookie);
+        return HTTP.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
     }
 
-    private static String extractCookieValue(String cookieStr, String name) {
-        if (cookieStr == null) return null;
-        Pattern p = Pattern.compile(Pattern.quote(name) + "=([^;]+)");
-        Matcher m = p.matcher(cookieStr);
-        return m.find() ? m.group(1) : null;
+    private static CompletableFuture<HttpResponse<String>> requestText(URI uri, String cookie) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(12)).GET();
+        if (!cookie.isBlank()) builder.header("Cookie", cookie);
+        return HTTP.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
     }
 
-    private static String readResponse(HttpURLConnection conn) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                sb.append(line);
-            }
-        }
-        return sb.toString();
+    private static URI uriWithQuery(URI endpoint, Map<String, String> parameters) {
+        return URI.create(endpoint + "?" + formEncode(parameters));
     }
 
-    private static String postJson(String url, String jsonBody) throws IOException {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        try {
-            conn.setRequestMethod("POST");
-            conn.setDoOutput(true);
-            conn.setDoInput(true);
-            conn.setConnectTimeout(15000);
-            conn.setReadTimeout(15000);
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(jsonBody.getBytes(StandardCharsets.UTF_8));
-            }
-
-            return readResponse(conn);
-        } finally {
-            conn.disconnect();
-        }
+    private static String formEncode(Map<String, String> parameters) {
+        return parameters.entrySet().stream().map(entry -> encode(entry.getKey()) + "=" + encode(entry.getValue())).collect(Collectors.joining("&"));
     }
+
+    private static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
+    private static String cookie(String header, String name) { String[] pair = firstCookiePair(header); return pair.length == 2 && pair[0].equals(name) ? pair[1] : ""; }
+    private static String[] firstCookiePair(String header) { return header == null ? new String[0] : header.split(";", 2)[0].trim().split("=", 2); }
+    private static String string(JsonObject object, String key) { return object != null && object.has(key) ? object.get(key).getAsString() : ""; }
+    private static long number(JsonObject object, String key, long fallback) { return object != null && object.has(key) ? object.get(key).getAsLong() : fallback; }
 
     public static final class QrSession {
-        private static volatile String qrsig;
-        private static volatile Consumer<LoginState> stateListener;
-
-        private QrSession() {
-        }
-
-        static void set(String sig) {
-            qrsig = sig;
-        }
-
-        static String getQrsig() {
-            return qrsig;
-        }
-
-        public static void setStateListener(Consumer<LoginState> listener) {
-            stateListener = listener;
-        }
-
-        public static void notifyState(LoginState state) {
-            Consumer<LoginState> l = stateListener;
-            if (l != null) {
-                l.accept(state);
-            }
-        }
-
-        public static void reset() {
-            qrsig = null;
-        }
+        private static volatile String signature = "";
+        private static volatile Consumer<LoginState> listener;
+        private QrSession() {}
+        static void set(String value) { signature = value == null ? "" : value; }
+        static String getQrsig() { return signature; }
+        public static void setStateListener(Consumer<LoginState> value) { listener = value; }
+        public static void notifyState(LoginState state) { Consumer<LoginState> current = listener; if (current != null) current.accept(state); }
+        public static void reset() { signature = ""; }
     }
 }

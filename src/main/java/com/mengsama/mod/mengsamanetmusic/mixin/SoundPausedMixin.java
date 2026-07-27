@@ -1,5 +1,6 @@
 package com.mengsama.mod.mengsamanetmusic.mixin;
 
+import com.mengsama.mod.mengsamanetmusic.client.audio.ClientMusicPlayback;
 import net.minecraft.client.sounds.SoundManager;
 import org.spongepowered.asm.mixin.Implements;
 import org.spongepowered.asm.mixin.Interface;
@@ -20,9 +21,10 @@ public abstract class SoundPausedMixin {
         mengsamanetmusic$isPause = true;
     }
 
-    @Inject(method = "resume", at = @At("HEAD"))
+    @Inject(method = "resume", at = @At("TAIL"))
     private void onResume(CallbackInfo ci) {
         mengsamanetmusic$isPause = false;
+        ClientMusicPlayback.reapplyDevicePauses();
     }
 
     @Unique

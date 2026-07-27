@@ -1,23 +1,35 @@
 package com.mengsama.mod.mengsamanetmusic.api;
 
-public class ParsedUrl {
-    private final ResourceType type;
-    private final String id;
+import java.util.Objects;
 
-    public ParsedUrl(ResourceType type, String id) {
-        this.type = type;
-        this.id = id;
+/** Immutable result of classifying a public QQ Music link. */
+public final class ParsedUrl {
+    public enum ResourceType {
+        ALBUM, SONG, PLAYLIST
+    }
+
+    private final ResourceType category;
+    private final String resourceKey;
+
+    public ParsedUrl(ResourceType category, String resourceKey) {
+        this.category = Objects.requireNonNull(category, "category");
+        String normalized = Objects.requireNonNullElse(resourceKey, "").trim();
+        if (normalized.isEmpty()) {
+            throw new IllegalArgumentException("resourceKey must not be blank");
+        }
+        this.resourceKey = normalized;
     }
 
     public ResourceType getType() {
-        return type;
+        return category;
     }
 
     public String getId() {
-        return id;
+        return resourceKey;
     }
 
-    public enum ResourceType {
-        ALBUM, SONG, PLAYLIST
+    @Override
+    public String toString() {
+        return category.name().toLowerCase() + ":" + resourceKey;
     }
 }

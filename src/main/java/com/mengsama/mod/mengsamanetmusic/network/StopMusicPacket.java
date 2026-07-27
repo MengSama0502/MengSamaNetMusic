@@ -6,15 +6,14 @@ import net.minecraftforge.network.PacketDistributor;
 
 import java.util.function.Supplier;
 
-public record StopMusicPacket(int playerID, String url) {
+public record StopMusicPacket(String targetId) {
 
     public void encode(FriendlyByteBuf buf) {
-        buf.writeInt(playerID);
-        buf.writeUtf(url);
+        buf.writeUtf(targetId);
     }
 
     public static StopMusicPacket decode(FriendlyByteBuf buf) {
-        return new StopMusicPacket(buf.readInt(), buf.readUtf());
+        return new StopMusicPacket(buf.readUtf());
     }
 
     public static void handle(StopMusicPacket packet, Supplier<NetworkEvent.Context> ctx) {
@@ -22,8 +21,11 @@ public record StopMusicPacket(int playerID, String url) {
         if (c.getDirection().getReceptionSide().isServer()) {
             c.enqueueWork(() -> {
 
-                ModNetwork.CHANNEL.send(PacketDistributor.ALL.noArg(),
-                        new StopMusicPacketClient(packet.playerID(), packet.url()));
+                var sender = c.getSender();
+                if (sender != null) {
+                    ModNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> sender),
+                            new StopMusicPacketClient(packet.targetId()));
+                }
             });
         }
         c.setPacketHandled(true);
