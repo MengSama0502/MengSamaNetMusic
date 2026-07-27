@@ -5,22 +5,11 @@
     "compatibilityLevel": "JAVA_17",
     "refmap": "mengsamanetmusic.refmap.json",
     "mixins": [
-        "AbstractContainerMenuMixin",
-        "FuckTelemetryMixin",
-        "CanPlayListMixin",
-        "PlayModeMixin",
-        "ItemMusicCDMixin",
-        "BlockMusicPlayerMixin",
-        "TileEntityMusicPlayerMixin",
-        "NetMusicListItemMixin"
     ],
     "client": [
-        "AbstractContainerScreenMixin",
-        "GetMusicMixin",
-        "GamePauseMixin",
-        "ScreenAccessor",
-        "SoundPausedMixin",
-        "TickableSoundGetterMixins"
+        "SoundEngineAccessorMixin",
+        "SoundManagerAccessorMixin",
+        "SoundPausedMixin"
     ],
     "server": [
     ]

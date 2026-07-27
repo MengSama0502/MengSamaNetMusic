@@ -1,6 +1,6 @@
 modLoader = "javafml"
 loaderVersion = "[46,)"
-license = "MIT"
+license = "BSD-3-Clause (code); CC BY-NC-SA 4.0 (assets); bundled components under their own terms"
 
 [[mods]]
 modId = "mengsamanetmusic"
@@ -8,7 +8,7 @@ version = "${mod_version}"
 logoFile = "Mod.png"
 displayName = "MengSama Net Music"
 authors = "MengSama0502, niumadadi520, YuZiJiang"
-credits = "Program: MengSama0502 & niumadadi520 | Art: YuZiJiang | Models: niumadadi520"
+credits = "Program: MengSama0502 & niumadadi520 | Art: YuZiJiang | Models: niumadadi520 | netMusicListForge portions: gly091020 (MIT) | See THIRD-PARTY-NOTICES.txt"
 description = '''
 MengSama Net Music is a comprehensive music player mod for Minecraft,
 integrating NetEase Cloud Music, QQ Music, and local music playback.
@@ -65,3 +65,10 @@ mandatory = true
 versionRange = "[4.2,)"
 ordering = "AFTER"
 side = "BOTH"
+
+[[dependencies.mengsamanetmusic]]
+modId = "jade"
+mandatory = false
+versionRange = "[11.12,)"
+ordering = "AFTER"
+side = "CLIENT"

@@ -1,0 +1,63 @@
+MengSama Net Music - License and Third-Party Notices
+===================================================
+
+This distribution is not covered by one blanket MIT license.
+
+Project material
+----------------
+1. NetMusic-derived and project Java code
+   License: BSD-3-Clause
+   Copyright holders/contributors: MengSama0502, niumadadi520, and NetMusic contributors.
+   Full text: LICENSE-CODE-BSD-3-CLAUSE.txt
+
+2. Project resources under src/main/resources/assets and src/main/resources/data
+   License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+   (CC BY-NC-SA 4.0), except the license/notice files themselves and third-party
+   material explicitly identified below.
+   Credits supplied with the project: UI art by YuZiJiang; models by niumadadi520.
+   This fixed distribution modifies and repackages those resources for Minecraft 1.20.1.
+   Full text: LICENSE-ASSETS-CC-BY-NC-SA-4.0.txt
+   Canonical URI: https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+3. netMusicListForge-derived portions
+   License: MIT
+   Copyright (c) 2025 gly091020
+   Full text: LICENSE-NETMUSICLISTFORGE-MIT.txt
+
+NetMusicCanNeedQQ clean-room notice
+-----------------------------------
+NetMusicCanNeedQQ was reviewed as an All Rights Reserved comparison reference.
+No NetMusicCanNeedQQ source file is included as a third-party component in this
+archive. QQ Music interoperability code in this distribution was independently
+implemented/reworked around public protocol facts; nonessential matching code
+was removed. This notice does not grant any right to NetMusicCanNeedQQ.
+
+Bundled runtime libraries
+-------------------------
+The final shaded JAR also contains relocated runtime library classes selected by
+build.gradle. Their upstream licenses and notices remain applicable:
+
+- ZXing Core 3.5.4 -- Apache License 2.0; Copyright (C) 2010 ZXing authors.
+  https://github.com/zxing/zxing
+  https://www.apache.org/licenses/LICENSE-2.0
+- MP3SPI 1.9.5.4 -- JavaZoom / soundlibs distribution.
+  http://www.javazoom.net/mp3spi/mp3spi.html
+- JLayer 1.0.1.4 -- JavaZoom / soundlibs distribution.
+  http://www.javazoom.net/javalayer/sources.html
+- tritonus-share 0.3.7.4 -- Tritonus project / soundlibs distribution.
+  http://tritonus.org/
+- jflac-codec 1.5.3-SNAPSHOT -- bundled local audio codec artifact; retain its
+  upstream copyright and license terms when redistributing.
+- javasound-aac 0.9.6 -- bundled local Java Sound AAC artifact; retain its
+  upstream copyright and license terms when redistributing.
+
+The two local audio artifacts do not contain embedded license files in the
+copies supplied to this source tree. Their inclusion here is recorded rather
+than silently presenting them as BSD/MIT project code. Redistributors should
+confirm their provenance and applicable upstream terms before further reuse.
+
+Trademarks and online services
+------------------------------
+Minecraft, QQ Music, NetEase Cloud Music, Apple Music, and other names are the
+property of their respective owners. Provider endpoints and parameter names are
+used only for interoperability. No endorsement or affiliation is claimed.
